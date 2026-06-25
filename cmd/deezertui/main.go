@@ -1,8 +1,6 @@
 // Command deezertui is a terminal Deezer client: log in with your ARL, browse
 // liked songs / playlists / search, and stream — decrypt + decode + play all
 // locally. Your ARL never leaves your machine except in requests to Deezer.
-//
-// Ported from the DiizerU Wii U client.
 package main
 
 import (

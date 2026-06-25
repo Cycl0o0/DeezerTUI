@@ -1,6 +1,6 @@
-// Package deezer ports DiizerU core/deezer_client.cpp: ARL login, gw-light +
-// public REST browse, and track -> CDN-url resolution. The ARL never leaves
-// the machine beyond the requests it makes to Deezer.
+// Package deezer is a Deezer client: ARL login, gw-light + public REST browse,
+// and track -> CDN-url resolution. The ARL never leaves the machine beyond the
+// requests it makes to Deezer.
 package deezer
 
 import (

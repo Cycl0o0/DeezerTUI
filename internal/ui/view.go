@@ -54,7 +54,7 @@ func (m *Model) searchView() string {
 }
 
 // Credits text, shown on the credits screen.
-const creditsAuthor = "cyclolysis"
+const creditsAuthor = "Cycl0o0"
 
 // Version is the app version, set from main at startup.
 var Version = "dev"
@@ -64,8 +64,7 @@ func (m *Model) creditsView() string {
 		accent.Render("DeezerTUI") + dim.Render(" "+Version),
 		dim.Render("a terminal Deezer client"),
 		"",
-		"Port of " + accent.Render("DiizerU") + dim.Render(" (Deezer on the Wii U)"),
-		"by " + creditsAuthor,
+		"by " + accent.Render(creditsAuthor),
 		"",
 		dim.Render("Built with:"),
 		"  • Bubble Tea / Bubbles / Lip Gloss — Charm",

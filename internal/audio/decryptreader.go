@@ -1,5 +1,5 @@
 // Package audio streams a Deezer CDN track, BF_CBC_STRIPE-decrypts it on the
-// fly, MP3-decodes it, and plays PCM. Ported from DiizerU audio/.
+// fly, MP3-decodes it, and plays PCM.
 package audio
 
 import (

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Known key vector for track 3135556 (from DiizerU deezer_decrypt_selftest).
+// Known Blowfish key vector for track 3135556.
 func TestBlowfishKeyVector(t *testing.T) {
 	want := []byte{108, 108, 102, 107, 57, 102, 44, 55, 101, 37, 117, 96, 60, 100, 52, 57}
 	got := BlowfishKey("3135556")

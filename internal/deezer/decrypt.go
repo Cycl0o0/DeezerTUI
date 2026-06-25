@@ -1,5 +1,4 @@
-// Package deezer: Blowfish BF_CBC_STRIPE decryption, ported from
-// DiizerU audio/deezer_decrypt.cpp.
+// Package deezer: Blowfish BF_CBC_STRIPE decryption for Deezer CDN streams.
 package deezer
 
 import (

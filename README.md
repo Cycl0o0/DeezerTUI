@@ -5,8 +5,8 @@ playlists and search, and stream — the track is downloaded, Blowfish
 stripe-decrypted, MP3-decoded and played **locally**. Your ARL never leaves your
 machine except in the requests it makes to Deezer.
 
-Go port of [DiizerU](../DiizerU), a Deezer client for the Wii U. Same on-device
-model, a Bubble Tea TUI instead of SDL/GamePad.
+A Bubble Tea terminal client that does the whole Deezer streaming path on your
+own machine — login, decrypt and decode — with nothing in between.
 
 ## Requirements
 
@@ -68,4 +68,4 @@ ARL ─login (gw-light)→ browse (gw + public REST)
 Personal/educational use, your own Premium account, your own risk. It reaches
 Deezer the unofficial way and decrypts your own entitled content locally, which
 almost certainly breaks Deezer's terms for third-party apps. Not affiliated with
-Deezer. AGPL-3.0, like the original DiizerU.
+Deezer. AGPL-3.0.
