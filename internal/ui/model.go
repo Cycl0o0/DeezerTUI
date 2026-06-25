@@ -4,6 +4,7 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"time"
 
 	"github.com/cyclolysis/deezertui/internal/audio"
@@ -23,6 +24,8 @@ const (
 	screenMenu
 	screenList
 	screenSearch
+	screenNowPlaying
+	screenCredits
 )
 
 // repeatMode mirrors core::RepeatMode.
@@ -50,15 +53,21 @@ type Model struct {
 	client *deezer.Client
 	player *audio.Player
 
-	screen   screen
-	list     list.Model
-	search   textinput.Model
-	spinner  spinner.Model
-	status   string // transient status / error line
-	loading  bool   // a network request is in flight
-	ready    bool
-	width    int
-	height   int
+	screen     screen
+	prevScreen screen // to restore after now-playing / credits
+	list       list.Model
+	search     textinput.Model
+	spinner    spinner.Model
+	status     string // transient status / error line
+	loading    bool   // a network request is in flight
+	ready      bool
+	width      int
+	height     int
+
+	// artwork for the current track
+	curImg      image.Image
+	curImgTrack string
+	curCover    string // rendered half-block cover
 
 	// playback queue
 	queue   []deezer.Track
@@ -124,6 +133,10 @@ type streamReadyMsg struct {
 type errMsg struct{ err error }
 type tickMsg time.Time
 type trackFinishedMsg struct{}
+type artMsg struct {
+	trackID string
+	img     image.Image
+}
 
 // Init kicks off login + the UI tick.
 func (m *Model) Init() tea.Cmd {
@@ -207,5 +220,16 @@ func (m *Model) streamCmd(t deezer.Track) tea.Cmd {
 			return errMsg{fmt.Errorf("resolve %q: %w", t.Name, err)}
 		}
 		return streamReadyMsg{plan: plan, track: t}
+	}
+}
+
+// coverCmd fetches + decodes a track's artwork (no-op message on failure).
+func (m *Model) coverCmd(trackID, url string) tea.Cmd {
+	return func() tea.Msg {
+		img, err := fetchCover(url)
+		if err != nil {
+			return artMsg{trackID: trackID, img: nil}
+		}
+		return artMsg{trackID: trackID, img: img}
 	}
 }

@@ -28,6 +28,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.list.SetSize(msg.Width, max(1, msg.Height-footerHeight))
 		m.ready = true
+		m.refreshCover()
 		return m, nil
 
 	case loginDoneMsg:
@@ -100,6 +101,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.playing = true
 		m.status = ""
+		// Reset + fetch artwork for the new track.
+		m.curImg = nil
+		m.curCover = ""
+		m.curImgTrack = msg.track.ID
+		if artworkSupported() && msg.track.ArtworkURL != "" {
+			return m, m.coverCmd(msg.track.ID, msg.track.ArtworkURL)
+		}
+		return m, nil
+
+	case artMsg:
+		if msg.img != nil && msg.trackID == m.curImgTrack {
+			m.curImg = msg.img
+			m.refreshCover()
+		}
 		return m, nil
 
 	case trackFinishedMsg:
@@ -202,8 +217,28 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.search.Focus()
 		m.screen = screenSearch
 		return m, nil
+	case "c":
+		// Toggle the now-playing / cover screen.
+		if m.screen == screenNowPlaying {
+			m.screen = m.prevScreen
+		} else {
+			m.prevScreen = m.screen
+			m.screen = screenNowPlaying
+		}
+		return m, nil
+	case "?":
+		if m.screen == screenCredits {
+			m.screen = m.prevScreen
+		} else {
+			m.prevScreen = m.screen
+			m.screen = screenCredits
+		}
+		return m, nil
 	case "esc", "backspace":
-		if m.screen == screenList {
+		switch m.screen {
+		case screenNowPlaying, screenCredits:
+			m.screen = m.prevScreen
+		case screenList:
 			m.screen = screenMenu
 			m.list.Title = "DeezerTUI"
 			m.list.SetItems(menuRows())

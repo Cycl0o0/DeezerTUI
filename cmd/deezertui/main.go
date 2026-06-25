@@ -17,9 +17,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	saveARL := flag.String("save-arl", "", "save this ARL to ~/.config/deezertui/arl.txt and exit")
+	showVer := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVer {
+		fmt.Println("deezertui", version)
+		return
+	}
 
 	if *saveARL != "" {
 		if err := ui.SaveARL(*saveARL); err != nil {
@@ -44,6 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	ui.Version = version
 	client := deezer.New(arl)
 	model := ui.New(client, player)
 

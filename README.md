@@ -13,11 +13,16 @@ model, a Bubble Tea TUI instead of SDL/GamePad.
 - Go 1.24+
 - A Deezer **Premium** account
 - A working audio output device
+- On **Linux**, ALSA dev headers to build (`sudo apt install libasound2-dev`).
+  macOS and Windows need nothing extra (no cgo).
+- Album art needs a **256-color or truecolor** terminal (rendered as half-blocks).
 
-## Setup
+## Install
+
+Grab a binary from the [Releases](../../releases) page, or build it:
 
 ```sh
-go build -o deezertui ./cmd/deezertui
+make build          # -> ./deezertui   (or: go build -o deezertui ./cmd/deezertui)
 ./deezertui -save-arl <your-arl>   # writes ~/.config/deezertui/arl.txt (0600)
 ./deezertui
 ```
@@ -33,10 +38,14 @@ Treat it like a password — it grants access to your account.
 |-----|--------|
 | ↑/↓ | move |
 | enter | open / play |
-| esc / backspace | back to menu |
+| esc / backspace | back |
 | space | play / pause |
 | n / p | next / previous |
+| z | toggle shuffle |
 | r | cycle repeat (off → all → one) |
+| +/- | volume up / down |
+| c | now-playing + album art |
+| ? | credits |
 | s | stop |
 | / | search |
 | q | quit |

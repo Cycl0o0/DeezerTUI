@@ -25,9 +25,14 @@ func (m *Model) View() string {
 		return "starting…"
 	}
 	var body string
-	if m.screen == screenSearch {
+	switch m.screen {
+	case screenSearch:
 		body = m.searchView()
-	} else {
+	case screenNowPlaying:
+		body = m.nowPlayingView()
+	case screenCredits:
+		body = m.creditsView()
+	default:
 		body = m.list.View()
 	}
 	return body + "\n" + m.footer()
@@ -46,6 +51,76 @@ func (m *Model) searchView() string {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines, "\n")
+}
+
+// Credits text, shown on the credits screen.
+const creditsAuthor = "cyclolysis"
+
+// Version is the app version, set from main at startup.
+var Version = "dev"
+
+func (m *Model) creditsView() string {
+	lines := []string{
+		accent.Render("DeezerTUI") + dim.Render(" "+Version),
+		dim.Render("a terminal Deezer client"),
+		"",
+		"Port of " + accent.Render("DiizerU") + dim.Render(" (Deezer on the Wii U)"),
+		"by " + creditsAuthor,
+		"",
+		dim.Render("Built with:"),
+		"  • Bubble Tea / Bubbles / Lip Gloss — Charm",
+		"  • go-mp3 + oto — Hajime Hoshi / Ebitengine",
+		"  • x/crypto/blowfish — Go authors",
+		"",
+		dim.Render("Audio decrypted + decoded locally. Your ARL never leaves your machine."),
+		dim.Render("AGPL-3.0. Not affiliated with Deezer."),
+		"",
+		dim.Render("? or esc to go back"),
+	}
+	return padTo(lines, max(1, m.height-footerHeight))
+}
+
+func (m *Model) nowPlayingView() string {
+	var meta []string
+	if m.qIndex >= 0 && m.qIndex < len(m.queue) {
+		t := m.queue[m.qIndex]
+		meta = []string{
+			accent.Render(t.Name),
+			t.ArtistLine(),
+			dim.Render(t.AlbumName),
+			"",
+			dim.Render(m.player.State().String()),
+		}
+	} else {
+		meta = []string{dim.Render("Nothing playing.")}
+	}
+
+	cover := m.curCover
+	if cover == "" {
+		if !artworkSupported() {
+			cover = dim.Render("(artwork needs a 256-color / truecolor terminal)")
+		} else if m.playing {
+			cover = dim.Render("(loading cover…)")
+		} else {
+			cover = dim.Render("(no cover)")
+		}
+	}
+
+	info := lipgloss.JoinVertical(lipgloss.Left, meta...)
+	row := lipgloss.JoinHorizontal(lipgloss.Top,
+		cover, lipgloss.NewStyle().PaddingLeft(2).Render(info))
+	return padTo([]string{row}, max(1, m.height-footerHeight))
+}
+
+// padTo joins lines and pads with blanks to fill n rows.
+func padTo(lines []string, n int) string {
+	out := strings.Join(lines, "\n")
+	have := strings.Count(out, "\n") + 1
+	for have < n {
+		out += "\n"
+		have++
+	}
+	return out
 }
 
 func (m *Model) footer() string {
@@ -74,7 +149,7 @@ func (m *Model) footer() string {
 		shuf = "on"
 	}
 	help := dim.Render(fmt.Sprintf(
-		"space pause · n/p next/prev · z shuffle:%s · r repeat:%s · +/- vol:%d%% · / search · s stop · q quit",
+		"space pause · n/p next/prev · z shuffle:%s · r repeat:%s · +/- vol:%d%% · / search · c cover · ? credits · q quit",
 		shuf, m.repeat.String(), int(m.player.Volume()*100+0.5)))
 
 	status := ""
