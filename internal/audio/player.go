@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cyclolysis/deezertui/internal/deezer"
+	"github.com/Cycl0o0/DeezerTUI/internal/deezer"
 	"github.com/ebitengine/oto/v3"
 	"github.com/hajimehoshi/go-mp3"
 )

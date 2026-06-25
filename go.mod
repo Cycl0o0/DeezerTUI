@@ -1,4 +1,4 @@
-module github.com/cyclolysis/deezertui
+module github.com/Cycl0o0/DeezerTUI
 
 go 1.26.3
 

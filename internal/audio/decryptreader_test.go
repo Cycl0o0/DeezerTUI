@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/cyclolysis/deezertui/internal/deezer"
+	"github.com/Cycl0o0/DeezerTUI/internal/deezer"
 )
 
 // oddReader hands out data in deliberately awkward, sub-block sizes to exercise

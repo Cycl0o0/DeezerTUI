@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cyclolysis/deezertui/internal/audio"
-	"github.com/cyclolysis/deezertui/internal/deezer"
-	"github.com/cyclolysis/deezertui/internal/ui"
+	"github.com/Cycl0o0/DeezerTUI/internal/audio"
+	"github.com/Cycl0o0/DeezerTUI/internal/deezer"
+	"github.com/Cycl0o0/DeezerTUI/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )

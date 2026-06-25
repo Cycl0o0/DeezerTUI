@@ -7,8 +7,8 @@ import (
 	"image"
 	"time"
 
-	"github.com/cyclolysis/deezertui/internal/audio"
-	"github.com/cyclolysis/deezertui/internal/deezer"
+	"github.com/Cycl0o0/DeezerTUI/internal/audio"
+	"github.com/Cycl0o0/DeezerTUI/internal/deezer"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"

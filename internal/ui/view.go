@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cyclolysis/deezertui/internal/audio"
+	"github.com/Cycl0o0/DeezerTUI/internal/audio"
 
 	"github.com/charmbracelet/lipgloss"
 )

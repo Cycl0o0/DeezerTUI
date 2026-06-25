@@ -5,7 +5,7 @@ package audio
 import (
 	"io"
 
-	"github.com/cyclolysis/deezertui/internal/deezer"
+	"github.com/Cycl0o0/DeezerTUI/internal/deezer"
 )
 
 // decryptReader wraps an encrypted CDN body and yields decrypted MP3 bytes.
