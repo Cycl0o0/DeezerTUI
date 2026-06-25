@@ -1,0 +1,211 @@
+// Package ui is the Bubble Tea TUI for DeezerTUI: a menu/list browser with an
+// always-visible now-playing footer. Network calls run as tea.Cmds.
+package ui
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/cyclolysis/deezertui/internal/audio"
+	"github.com/cyclolysis/deezertui/internal/deezer"
+
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// screen is the current top-level view.
+type screen int
+
+const (
+	screenLoading screen = iota
+	screenMenu
+	screenList
+	screenSearch
+)
+
+// repeatMode mirrors core::RepeatMode.
+type repeatMode int
+
+const (
+	repeatOff repeatMode = iota
+	repeatAll
+	repeatOne
+)
+
+func (r repeatMode) String() string {
+	switch r {
+	case repeatAll:
+		return "all"
+	case repeatOne:
+		return "one"
+	default:
+		return "off"
+	}
+}
+
+// Model is the root Bubble Tea model.
+type Model struct {
+	client *deezer.Client
+	player *audio.Player
+
+	screen   screen
+	list     list.Model
+	search   textinput.Model
+	spinner  spinner.Model
+	status   string // transient status / error line
+	loading  bool   // a network request is in flight
+	ready    bool
+	width    int
+	height   int
+
+	// playback queue
+	queue   []deezer.Track
+	qIndex  int
+	repeat  repeatMode
+	shuffle bool
+	history []int // visited queue indices, for prev under shuffle
+	playing bool  // a track is loaded/playing
+
+	finished chan struct{} // signalled by player onFinish
+}
+
+// New builds the root model.
+func New(client *deezer.Client, player *audio.Player) *Model {
+	ti := textinput.New()
+	ti.Placeholder = "Search Deezer…"
+	ti.CharLimit = 120
+
+	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(true)
+
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+
+	m := &Model{
+		client:   client,
+		player:   player,
+		screen:   screenLoading,
+		list:     l,
+		search:   ti,
+		spinner:  sp,
+		status:   "Logging in…",
+		loading:  true,
+		finished: make(chan struct{}, 1),
+	}
+	player.SetOnFinish(func() {
+		select {
+		case m.finished <- struct{}{}:
+		default:
+		}
+	})
+	return m
+}
+
+// ---- messages ----
+
+type loginDoneMsg struct{ err error }
+type tracksMsg struct {
+	title  string
+	tracks []deezer.Track
+	play   bool // auto-play first track (queue context)
+}
+type playlistsMsg struct {
+	title     string
+	playlists []deezer.Playlist
+}
+type searchMsg struct{ results *deezer.SearchResults }
+type streamReadyMsg struct {
+	plan  *deezer.StreamPlan
+	track deezer.Track
+}
+type errMsg struct{ err error }
+type tickMsg time.Time
+type trackFinishedMsg struct{}
+
+// Init kicks off login + the UI tick.
+func (m *Model) Init() tea.Cmd {
+	return tea.Batch(m.loginCmd(), tickCmd(), m.waitFinish(), m.spinner.Tick)
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// waitFinish blocks on the player's finish channel.
+func (m *Model) waitFinish() tea.Cmd {
+	return func() tea.Msg {
+		<-m.finished
+		return trackFinishedMsg{}
+	}
+}
+
+// ---- commands ----
+
+func (m *Model) loginCmd() tea.Cmd {
+	return func() tea.Msg {
+		return loginDoneMsg{err: m.client.Login()}
+	}
+}
+
+func (m *Model) favoritesCmd() tea.Cmd {
+	return func() tea.Msg {
+		ts, err := m.client.Favorites()
+		if err != nil {
+			return errMsg{err}
+		}
+		return tracksMsg{title: "❤  Liked Songs", tracks: ts}
+	}
+}
+
+func (m *Model) playlistsCmd() tea.Cmd {
+	return func() tea.Msg {
+		ps, err := m.client.Playlists()
+		if err != nil {
+			return errMsg{err}
+		}
+		return playlistsMsg{title: "≡  My Playlists", playlists: ps}
+	}
+}
+
+func (m *Model) playlistTracksCmd(p deezer.Playlist) tea.Cmd {
+	return func() tea.Msg {
+		ts, err := m.client.PlaylistTracks(p.ID)
+		if err != nil {
+			return errMsg{err}
+		}
+		return tracksMsg{title: p.Name, tracks: ts}
+	}
+}
+
+func (m *Model) albumTracksCmd(a deezer.Album) tea.Cmd {
+	return func() tea.Msg {
+		ts, err := m.client.AlbumTracks(a.ID)
+		if err != nil {
+			return errMsg{err}
+		}
+		return tracksMsg{title: a.Name, tracks: ts}
+	}
+}
+
+func (m *Model) searchCmd(q string) tea.Cmd {
+	return func() tea.Msg {
+		r, err := m.client.Search(q)
+		if err != nil {
+			return errMsg{err}
+		}
+		return searchMsg{results: r}
+	}
+}
+
+func (m *Model) streamCmd(t deezer.Track) tea.Cmd {
+	return func() tea.Msg {
+		plan, err := m.client.PrepareStream(t.ID)
+		if err != nil {
+			return errMsg{fmt.Errorf("resolve %q: %w", t.Name, err)}
+		}
+		return streamReadyMsg{plan: plan, track: t}
+	}
+}
