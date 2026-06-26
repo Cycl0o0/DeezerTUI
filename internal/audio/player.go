@@ -53,9 +53,9 @@ const (
 type Player struct {
 	ctx *oto.Context
 
-	mu       sync.Mutex
-	cur      *oto.Player
-	decoder  *mp3.Decoder
+	mu      sync.Mutex
+	cur     *oto.Player
+	src     *seekSource
 
 	state    atomic.Int32
 	played   atomic.Int64 // decoded PCM bytes consumed by oto (position)
@@ -63,6 +63,41 @@ type Player struct {
 	lastErr  atomic.Value // string
 	volume   atomic.Uint64 // float64 bits, 0..1
 	onFinish func()
+}
+
+// seekSource is the io.Reader oto pulls from. It performs any requested seek on
+// the audio-output goroutine, inside the same lock as Read, so the go-mp3
+// decoder is never read and seeked concurrently (which aborts the process).
+type seekSource struct {
+	p       *Player
+	dec     *mp3.Decoder
+	mu      sync.Mutex
+	pending int64 // PCM byte offset to seek to, or -1 for none
+}
+
+func (s *seekSource) Read(b []byte) (int, error) {
+	s.mu.Lock()
+	if s.pending >= 0 {
+		off := s.pending
+		s.pending = -1
+		// A bad seek must not take down the audio goroutine.
+		func() {
+			defer func() { _ = recover() }()
+			if _, err := s.dec.Seek(off, io.SeekStart); err == nil {
+				s.p.played.Store(off)
+			}
+		}()
+	}
+	s.mu.Unlock()
+	n, err := s.dec.Read(b)
+	s.p.played.Add(int64(n))
+	return n, err
+}
+
+func (s *seekSource) requestSeek(off int64) {
+	s.mu.Lock()
+	s.pending = off
+	s.mu.Unlock()
 }
 
 // NewPlayer creates the audio output context.
@@ -125,18 +160,6 @@ func (p *Player) AddVolume(delta float64) float64 {
 	return p.Volume()
 }
 
-// countReader counts decoded bytes pulled by oto (for position).
-type countReader struct {
-	r io.Reader
-	p *Player
-}
-
-func (c countReader) Read(b []byte) (int, error) {
-	n, err := c.r.Read(b)
-	c.p.played.Add(int64(n))
-	return n, err
-}
-
 // Play downloads + decrypts the whole track, then decodes and plays it.
 func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 	p.Stop()
@@ -175,12 +198,13 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 		return err
 	}
 
-	player := p.ctx.NewPlayer(countReader{r: decoder, p: p})
+	src := &seekSource{p: p, dec: decoder, pending: -1}
+	player := p.ctx.NewPlayer(src)
 	player.SetVolume(p.Volume())
 
 	p.mu.Lock()
 	p.cur = player
-	p.decoder = decoder
+	p.src = src
 	p.mu.Unlock()
 
 	player.Play()
@@ -190,15 +214,15 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 	return nil
 }
 
-// SeekMS jumps to an absolute position by seeking the decoded stream and
-// rebuilding the oto player (to flush its buffered audio).
+// SeekMS jumps to an absolute position. The actual decoder seek happens on the
+// audio goroutine (see seekSource.Read), so no player is recreated and the
+// decoder is never accessed concurrently — both of which previously aborted the
+// in-process GUI.
 func (p *Player) SeekMS(ms int64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	// A decode/seek fault must never abort the host process (the GUI links this
-	// in-process), so swallow any panic from go-mp3/oto.
-	defer func() { _ = recover() }()
-	if p.decoder == nil || p.cur == nil {
+	src := p.src
+	p.mu.Unlock()
+	if src == nil {
 		return
 	}
 	if ms < 0 {
@@ -209,30 +233,8 @@ func (p *Player) SeekMS(ms int64) {
 	}
 	off := ms * bytesPerSec / 1000
 	off -= off % (channels * 2) // align to a whole stereo frame
-
-	wasPlaying := p.State() == Playing
-	// Stop the old player's read loop BEFORE seeking — go-mp3's decoder is not
-	// safe for concurrent Read+Seek, and the old oto player reads the same
-	// decoder on its own goroutine.
-	p.cur.Pause()
-	p.cur.Close()
-	p.cur = nil
-
-	if _, err := p.decoder.Seek(off, io.SeekStart); err != nil {
-		p.state.Store(int32(Stopped))
-		return
-	}
-	p.played.Store(off)
-
-	np := p.ctx.NewPlayer(countReader{r: p.decoder, p: p})
-	np.SetVolume(p.Volume())
-	p.cur = np
-	np.Play()
-	if !wasPlaying {
-		np.Pause()
-		p.state.Store(int32(Paused))
-	}
-	go p.watch(np)
+	p.played.Store(off)         // optimistic, for a snappy scrubber
+	src.requestSeek(off)
 }
 
 func (p *Player) watch(player *oto.Player) {
@@ -304,7 +306,7 @@ func (p *Player) teardownLocked() {
 		p.cur.Close()
 		p.cur = nil
 	}
-	p.decoder = nil
+	p.src = nil
 }
 
 func (p *Player) fail(err error) {

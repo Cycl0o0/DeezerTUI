@@ -15,6 +15,12 @@ struct OpenDeezerApp: App {
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
+        .commands {
+            // Replace the default "About OpenDeezer" panel with our credits.
+            CommandGroup(replacing: .appInfo) {
+                Button("About OpenDeezer") { app.showCredits = true }
+            }
+        }
     }
 }
 
