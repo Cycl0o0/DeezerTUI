@@ -67,14 +67,22 @@ jobs:
           fail_on_unmatched_files: true
 
   # ---- macOS GUI (SwiftUI / Liquid Glass) ----
-  # NOTE: Liquid Glass needs the macOS 26 / Xcode 26 SDK. Until GitHub offers a
-  # macos-26 runner image this job may fail to compile; bump `runs-on` then.
+  # Liquid Glass needs the macOS 26 / Xcode 26 SDK (.glassEffect etc. live in
+  # SwiftUICore 26), so this requires the macos-26 runner image. That image is
+  # rolling out (actions/runner-images#13739) and may be missing or buggy on a
+  # given account/region, so keep the job non-blocking until it's GA — a failure
+  # here must not fail the release (the TUI darwin matrix is cgo-free + unaffected).
   macos-app:
     needs: detect
     if: needs.detect.outputs.macos == 'true'
-    runs-on: macos-15
+    runs-on: macos-26
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 26
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.0"
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
