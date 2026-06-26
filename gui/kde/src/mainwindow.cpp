@@ -143,9 +143,12 @@ QString loadARL() {
     return QString();
 }
 
-// A themed app icon, falling back to a Deezer-purple disc with a white note so
-// the tray entry and window are recognisable even without an installed theme.
+// The app icon: prefer the embedded official logo (Qt resource), then the
+// installed theme icon, then a drawn Deezer-purple disc as a last resort.
 QIcon appIcon() {
+    QIcon embedded(QStringLiteral(":/opendeezer.png"));
+    if (!embedded.isNull())
+        return embedded;
     QIcon themed = QIcon::fromTheme(QStringLiteral("org.opendeezer.OpenDeezer"));
     if (!themed.isNull())
         return themed;
