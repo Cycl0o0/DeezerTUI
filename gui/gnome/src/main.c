@@ -1380,7 +1380,11 @@ static void on_activate(GApplication *app, gpointer data) {
   }
 }
 
-int main(int argc, char **argv) {
+/* Entry point. Exported so the unified Linux launcher (gui/linux) can dlopen
+ * this backend as libopendeezer-gtk.so and call opendeezer_run; the standalone
+ * opendeezer-gnome executable wraps it with a trivial main (standalone.c). */
+__attribute__((visibility("default")))
+int opendeezer_run(int argc, char **argv) {
   AdwApplication *app = adw_application_new("org.opendeezer.OpenDeezer", G_APPLICATION_DEFAULT_FLAGS);
   g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
   int status = g_application_run(G_APPLICATION(app), argc, argv);

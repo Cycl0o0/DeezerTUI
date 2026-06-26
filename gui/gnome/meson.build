@@ -35,6 +35,12 @@ dzcore = declare_dependency(
 )
 
 executable('opendeezer-gnome',
+  'src/main.c', 'src/standalone.c', resources,
+  dependencies: deps + [dzcore],
+  install: true)
+
+# GTK backend for the unified Linux client (gui/linux launcher dlopen's this).
+shared_library('opendeezer-gtk',
   'src/main.c', resources,
   dependencies: deps + [dzcore],
   install: true)

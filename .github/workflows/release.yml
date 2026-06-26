@@ -19,11 +19,12 @@ jobs:
       gnome: ${{ steps.c.outputs.gnome }}
       kde: ${{ steps.c.outputs.kde }}
       windows: ${{ steps.c.outputs.windows }}
+      linux: ${{ steps.c.outputs.linux }}
     steps:
       - uses: actions/checkout@v4
       - id: c
         run: |
-          for d in macos gnome kde windows; do
+          for d in macos gnome kde windows linux; do
             if [ -d "gui/$d" ]; then echo "$d=true" >> "$GITHUB_OUTPUT"; else echo "$d=false" >> "$GITHUB_OUTPUT"; fi
           done
 
@@ -151,6 +152,34 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: OpenDeezer-kde-${{ matrix.arch }}
+
+  # ---- Unified Linux client (GTK + Qt backends behind a dlopen launcher) ----
+  linux-unified:
+    needs: detect
+    if: needs.detect.outputs.linux == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04,     arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjson-glib-dev qt6-base-dev libasound2-dev meson ninja-build cmake
+      - name: Build unified bundle
+        run: cd gui/linux && chmod +x build.sh && ./build.sh
+      - name: Package
+        run: tar -C gui/linux/dist -czf OpenDeezer-linux-${{ matrix.arch }}.tar.gz .
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: OpenDeezer-linux-${{ matrix.arch }}.tar.gz
 
   # ---- Windows GUI (WinUI 3 / C++/WinRT) — needs VS + WinApp SDK + MinGW (Go DLL) ----
   windows-gui:

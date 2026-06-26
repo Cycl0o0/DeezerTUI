@@ -6,7 +6,11 @@
 
 #include "mainwindow.h"
 
-int main(int argc, char **argv) {
+// Exported so the unified Linux launcher (gui/linux) can dlopen this backend as
+// libopendeezer-qt.so and call opendeezer_run; the standalone opendeezer-kde
+// executable wraps it with a trivial main (standalone.cpp).
+extern "C" __attribute__((visibility("default")))
+int opendeezer_run(int argc, char **argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("OpenDeezer");
     QApplication::setApplicationDisplayName("OpenDeezer");
