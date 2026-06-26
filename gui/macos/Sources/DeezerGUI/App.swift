@@ -22,23 +22,15 @@ struct RootView: View {
     @EnvironmentObject var app: AppState
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            Group {
-                if app.loggedIn {
-                    NavigationSplitView {
-                        Sidebar()
-                    } detail: {
-                        DetailView()
-                    }
-                } else {
-                    LoginGate()
-                }
-            }
-            // Floating Apple-Music-style player bar over the content.
+        Group {
             if app.loggedIn {
-                PlayerBar()
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
+                NavigationSplitView {
+                    Sidebar()
+                } detail: {
+                    DetailView()
+                }
+            } else {
+                LoginGate()
             }
         }
         .background(DZ.windowBG)
@@ -158,6 +150,10 @@ struct DetailView: View {
         }
         .background(DZ.windowBG)
         .overlay { if app.busy { ProgressView().controlSize(.large).tint(DZ.accent) } }
+        // Floating player bar, confined to the detail column (not the sidebar).
+        .overlay(alignment: .bottom) {
+            PlayerBar().padding(.horizontal, 12).padding(.bottom, 12)
+        }
     }
 }
 
