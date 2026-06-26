@@ -1287,9 +1287,8 @@ static void on_activate(GApplication *app, gpointer data) {
   a->current_index = -1;
   APP = a;
 
-  /* load persisted settings and apply the audio quality before any playback */
+  /* load persisted settings; quality is applied after login (init_done) */
   settings_load(a);
-  DZSetQuality(a->high_quality ? 1 : 0);
 
   /* publish ourselves on the session bus for the OS media controls */
   mpris_setup(a);
