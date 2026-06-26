@@ -31,3 +31,9 @@ type Controller interface {
 	Update(State)
 	Close()
 }
+
+// noop is the controller used when MPRIS is unavailable (non-Linux, or no bus).
+type noop struct{}
+
+func (noop) Update(State) {}
+func (noop) Close()       {}

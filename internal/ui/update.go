@@ -101,6 +101,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.playing = true
 		m.status = ""
+		m.publishMedia()
 		// Reset + fetch artwork for the new track.
 		m.curImg = nil
 		m.curCover = ""
@@ -127,7 +128,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		m.publishMedia()
 		return m, tickCmd()
+
+	case mediaCmdMsg:
+		switch msg.kind {
+		case "playpause":
+			m.player.TogglePause()
+		case "next":
+			return m, tea.Batch(m.next(), nil)
+		case "prev":
+			return m, m.prev()
+		case "stop":
+			m.player.Stop()
+			m.playing = false
+		case "seek":
+			m.player.SeekMS(m.player.PositionMS() + msg.arg/1000)
+		case "setpos":
+			m.player.SeekMS(msg.arg / 1000)
+		}
+		m.publishMedia()
+		return m, nil
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -183,6 +204,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		m.player.Stop()
+		if m.media != nil {
+			m.media.Close()
+		}
 		return m, tea.Quit
 	case " ":
 		m.player.TogglePause()

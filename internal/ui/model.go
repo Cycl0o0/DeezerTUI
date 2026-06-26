@@ -9,6 +9,7 @@ import (
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
+	"github.com/Cycl0o0/OpenDeezer/internal/mpris"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -77,7 +78,56 @@ type Model struct {
 	history []int // visited queue indices, for prev under shuffle
 	playing bool  // a track is loaded/playing
 
+	media mpris.Controller // OS media controls (MPRIS on Linux, no-op elsewhere)
+
 	finished chan struct{} // signalled by player onFinish
+}
+
+// mediaCmdMsg is a media-key/overlay command received from the desktop.
+type mediaCmdMsg struct {
+	kind string // "playpause" | "next" | "prev" | "stop" | "seek" | "setpos"
+	arg  int64  // microseconds for seek/setpos
+}
+
+// StartMedia wires OS media controls (MPRIS) to the running program. Commands
+// from the desktop are delivered as mediaCmdMsg via the program's Send so they
+// run on the Bubble Tea update loop. Call after tea.NewProgram, before Run.
+func (m *Model) StartMedia(send func(tea.Msg)) {
+	m.media = mpris.New(mpris.Commands{
+		PlayPause:   func() { send(mediaCmdMsg{kind: "playpause"}) },
+		Next:        func() { send(mediaCmdMsg{kind: "next"}) },
+		Prev:        func() { send(mediaCmdMsg{kind: "prev"}) },
+		Stop:        func() { send(mediaCmdMsg{kind: "stop"}) },
+		Seek:        func(us int64) { send(mediaCmdMsg{kind: "seek", arg: us}) },
+		SetPosition: func(_ string, us int64) { send(mediaCmdMsg{kind: "setpos", arg: us}) },
+	})
+}
+
+// publishMedia pushes the current now-playing state to the desktop.
+func (m *Model) publishMedia() {
+	if m.media == nil {
+		return
+	}
+	var s mpris.State
+	switch m.player.State() {
+	case audio.Playing:
+		s.Status = "Playing"
+	case audio.Paused:
+		s.Status = "Paused"
+	default:
+		s.Status = "Stopped"
+	}
+	if m.qIndex >= 0 && m.qIndex < len(m.queue) {
+		t := m.queue[m.qIndex]
+		s.TrackID = t.ID
+		s.Title = t.Name
+		s.Artist = t.ArtistLine()
+		s.Album = t.AlbumName
+		s.ArtURL = t.ArtworkURL
+		s.LengthUS = t.DurationMS * 1000
+	}
+	s.PositionUS = m.player.PositionMS() * 1000
+	m.media.Update(s)
 }
 
 // New builds the root model.

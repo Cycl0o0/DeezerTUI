@@ -57,6 +57,7 @@ func main() {
 	model := ui.New(client, player)
 
 	p := tea.NewProgram(model, tea.WithAltScreen())
+	model.StartMedia(p.Send) // OS media controls (MPRIS on Linux)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
