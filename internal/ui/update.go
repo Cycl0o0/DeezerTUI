@@ -34,12 +34,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loginDoneMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.status = "Login failed: " + msg.err.Error() + "  (set DEEZER_ARL or ~/.config/deezertui/arl.txt)"
+			m.status = "Login failed: " + msg.err.Error() + "  (set DEEZER_ARL or ~/.config/opendeezer/arl.txt)"
 			return m, nil
 		}
 		m.screen = screenMenu
 		m.status = "Logged in."
-		m.list.Title = "DeezerTUI"
+		m.list.Title = "OpenDeezer"
 		m.list.SetItems(menuRows())
 		return m, nil
 
@@ -246,7 +246,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = m.prevScreen
 		case screenList:
 			m.screen = screenMenu
-			m.list.Title = "DeezerTUI"
+			m.list.Title = "OpenDeezer"
 			m.list.SetItems(menuRows())
 			m.list.ResetSelected()
 		}

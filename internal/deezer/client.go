@@ -19,7 +19,7 @@ const (
 	mediaURL = "https://media.deezer.com/v1/get_url"
 	restURL  = "https://api.deezer.com"
 
-	userAgent = "Mozilla/5.0 DeezerTUI/0.1"
+	userAgent = "Mozilla/5.0 OpenDeezer/0.1"
 )
 
 // Client holds an authenticated Deezer session.

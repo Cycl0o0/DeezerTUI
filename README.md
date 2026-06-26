@@ -1,4 +1,4 @@
-# DeezerTUI
+# OpenDeezer
 
 A terminal Deezer client. Log in with your Deezer ARL, browse your liked songs,
 playlists and search, and stream — the track is downloaded, Blowfish
@@ -22,12 +22,12 @@ own machine — login, decrypt and decode — with nothing in between.
 Grab a binary from the [Releases](../../releases) page, or build it:
 
 ```sh
-make build          # -> ./deezertui   (or: go build -o deezertui ./cmd/deezertui)
-./deezertui -save-arl <your-arl>   # writes ~/.config/deezertui/arl.txt (0600)
-./deezertui
+make build          # -> ./opendeezer   (or: go build -o opendeezer ./cmd/opendeezer)
+./opendeezer -save-arl <your-arl>   # writes ~/.config/opendeezer/arl.txt (0600)
+./opendeezer
 ```
 
-Or pass it inline: `DEEZER_ARL=<your-arl> ./deezertui`.
+Or pass it inline: `DEEZER_ARL=<your-arl> ./opendeezer`.
 
 Your ARL is the `arl` cookie from an authenticated `deezer.com` browser session.
 Treat it like a password — it grants access to your account.

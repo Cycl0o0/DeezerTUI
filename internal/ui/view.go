@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Cycl0o0/DeezerTUI/internal/audio"
+	"github.com/Cycl0o0/OpenDeezer/internal/audio"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -61,8 +61,8 @@ var Version = "dev"
 
 func (m *Model) creditsView() string {
 	lines := []string{
-		accent.Render("DeezerTUI") + dim.Render(" "+Version),
-		dim.Render("a terminal Deezer client"),
+		accent.Render("OpenDeezer") + dim.Render(" "+Version),
+		dim.Render("An open source reimplementation of Deezer"),
 		"",
 		"by " + accent.Render(creditsAuthor),
 		"",

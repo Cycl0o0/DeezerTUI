@@ -1,4 +1,4 @@
-// Command deezercore exposes the DeezerTUI engine (login, browse, decrypt +
+// Command deezercore exposes the OpenDeezer engine (login, browse, decrypt +
 // decode + playback) as a C-callable library so native GUIs (SwiftUI on macOS,
 // GTK/libadwaita on GNOME, Qt on KDE) can drive it in-process.
 //
@@ -21,8 +21,8 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/Cycl0o0/DeezerTUI/internal/audio"
-	"github.com/Cycl0o0/DeezerTUI/internal/deezer"
+	"github.com/Cycl0o0/OpenDeezer/internal/audio"
+	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 )
 
 func main() {} // required for buildmode=c-archive

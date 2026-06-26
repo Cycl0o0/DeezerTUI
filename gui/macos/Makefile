@@ -1,8 +1,8 @@
-# Build the macOS SwiftUI app. `make app` produces Deezer.app; `make run` opens it.
+# Build the macOS SwiftUI app. `make app` produces OpenDeezer.app; `make run` opens it.
 ROOT    := ../..
 CONFIG  := release
-APP     := Deezer.app
-BIN     := DeezerGUI
+APP     := OpenDeezer.app
+BIN     := OpenDeezer
 BUILDIR := .build/$(CONFIG)
 # Match the SDK so the Go archive and Swift link target agree.
 export MACOSX_DEPLOYMENT_TARGET := 26.0

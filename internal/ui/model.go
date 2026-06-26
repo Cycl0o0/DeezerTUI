@@ -1,4 +1,4 @@
-// Package ui is the Bubble Tea TUI for DeezerTUI: a menu/list browser with an
+// Package ui is the Bubble Tea TUI for OpenDeezer: a menu/list browser with an
 // always-visible now-playing footer. Network calls run as tea.Cmds.
 package ui
 
@@ -7,8 +7,8 @@ import (
 	"image"
 	"time"
 
-	"github.com/Cycl0o0/DeezerTUI/internal/audio"
-	"github.com/Cycl0o0/DeezerTUI/internal/deezer"
+	"github.com/Cycl0o0/OpenDeezer/internal/audio"
+	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"

@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/Cycl0o0/DeezerTUI/internal/deezer"
+import "github.com/Cycl0o0/OpenDeezer/internal/deezer"
 
 // rowKind identifies what a list row represents.
 type rowKind int

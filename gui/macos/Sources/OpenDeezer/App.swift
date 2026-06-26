@@ -1,11 +1,11 @@
 import SwiftUI
 
 @main
-struct DeezerGUIApp: App {
+struct OpenDeezerApp: App {
     @StateObject private var app = AppState()
 
     var body: some Scene {
-        WindowGroup("Deezer") {
+        WindowGroup("OpenDeezer") {
             RootView()
                 .environmentObject(app)
                 .frame(minWidth: 940, minHeight: 600)
@@ -34,6 +34,7 @@ struct RootView: View {
             }
         }
         .background(DZ.windowBG)
+        .sheet(isPresented: $app.showCredits) { CreditsView() }
     }
 }
 
@@ -43,7 +44,7 @@ struct LoginGate: View {
         VStack(spacing: 14) {
             Image(systemName: "waveform.circle.fill")
                 .font(.system(size: 56)).foregroundStyle(DZ.accent)
-            Text("Deezer").font(.system(size: 34, weight: .bold)).foregroundStyle(DZ.textPri)
+            Text("OpenDeezer").font(.system(size: 34, weight: .bold)).foregroundStyle(DZ.textPri)
             if app.busy {
                 ProgressView("Logging in…").tint(DZ.accent)
             } else if let e = app.loginError {
@@ -112,20 +113,63 @@ struct SidebarLabel: View {
 }
 
 struct AccountRow: View {
+    @EnvironmentObject var app: AppState
     let userID: String
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "person.crop.circle.fill")
                 .font(.system(size: 26)).foregroundStyle(DZ.accent)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Deezer").font(.system(size: 13, weight: .medium)).foregroundStyle(DZ.textPri)
+                Text("OpenDeezer").font(.system(size: 13, weight: .medium)).foregroundStyle(DZ.textPri)
                 Text(userID.isEmpty ? "—" : "user \(userID)")
                     .font(.system(size: 11)).foregroundStyle(DZ.textSec)
             }
             Spacer()
+            Button { app.showCredits = true } label: {
+                Image(systemName: "info.circle").foregroundStyle(DZ.textSec)
+            }
+            .buttonStyle(.plain).help("About OpenDeezer")
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .overlay(Divider().overlay(DZ.hairline), alignment: .top)
+    }
+}
+
+// CreditsView — the About sheet, crediting the author like the TUI.
+struct CreditsView: View {
+    @EnvironmentObject var app: AppState
+
+    private var version: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.1.0"
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "waveform.circle.fill")
+                .font(.system(size: 52)).foregroundStyle(DZ.accent)
+            Text("OpenDeezer").font(.system(size: 26, weight: .bold)).foregroundStyle(DZ.textPri)
+            Text("v\(version) · An open source reimplementation of Deezer")
+                .font(.callout).foregroundStyle(DZ.textSec)
+            Text("by Cycl0o0").font(.body).foregroundStyle(DZ.accent)
+
+            Divider().frame(width: 240)
+
+            VStack(spacing: 4) {
+                Text("Built with SwiftUI + a Go engine").foregroundStyle(DZ.textPri)
+                Text("go-mp3 + oto · x/crypto/blowfish").foregroundStyle(DZ.textSec)
+                Text("Audio decrypted + decoded locally — your ARL never leaves your machine.")
+                    .foregroundStyle(DZ.textSec).multilineTextAlignment(.center)
+                Text("AGPL-3.0 · Not affiliated with Deezer.").foregroundStyle(DZ.textSec)
+            }
+            .font(.caption).frame(maxWidth: 320)
+
+            Button("Done") { app.showCredits = false }
+                .buttonStyle(.glassProminent).tint(DZ.accent).controlSize(.large)
+                .padding(.top, 4)
+        }
+        .padding(28)
+        .frame(width: 420)
+        .background(DZ.windowBG)
     }
 }
 

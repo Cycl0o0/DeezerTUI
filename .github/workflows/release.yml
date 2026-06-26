@@ -40,8 +40,8 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           EXT=""; [ "$GOOS" = windows ] && EXT=".exe"
-          OUT="deezertui-${GOOS}-${GOARCH}${EXT}"
-          go build -ldflags "-s -w -X main.version=${VERSION}" -o "$OUT" ./cmd/deezertui
+          OUT="opendeezer-${GOOS}-${GOARCH}${EXT}"
+          go build -ldflags "-s -w -X main.version=${VERSION}" -o "$OUT" ./cmd/opendeezer
           echo "ARTIFACT=$OUT" >> "$GITHUB_ENV"
 
       - name: Upload to release

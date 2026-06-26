@@ -1,4 +1,4 @@
-module github.com/Cycl0o0/DeezerTUI
+module github.com/Cycl0o0/OpenDeezer
 
 go 1.26.3
 

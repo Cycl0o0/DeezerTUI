@@ -14,6 +14,7 @@ final class AppState: ObservableObject {
     @Published var loginError: String?
     @Published var busy = false
     @Published var userID = ""
+    @Published var showCredits = false
 
     @Published var section: Section = .liked
     @Published var tracks: [Track] = []          // current track list / queue
@@ -44,7 +45,7 @@ final class AppState: ObservableObject {
 
     func start() {
         guard let arl = Self.loadARL(), !arl.isEmpty else {
-            loginError = "No ARL found. Set $DEEZER_ARL or ~/.config/deezertui/arl.txt"
+            loginError = "No ARL found. Set $DEEZER_ARL or ~/.config/opendeezer/arl.txt"
             return
         }
         busy = true
@@ -68,9 +69,15 @@ final class AppState: ObservableObject {
     static func loadARL() -> String? {
         if let v = ProcessInfo.processInfo.environment["DEEZER_ARL"], !v.isEmpty { return v }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let path = home.appendingPathComponent(".config/deezertui/arl.txt")
-        return (try? String(contentsOf: path, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Prefer the new config dir; fall back to the legacy one.
+        for dir in ["opendeezer", "deezertui"] {
+            let path = home.appendingPathComponent(".config/\(dir)/arl.txt")
+            if let s = (try? String(contentsOf: path, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+                return s
+            }
+        }
+        return nil
     }
 
     // MARK: browse

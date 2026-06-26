@@ -1,4 +1,4 @@
-// Command deezertui is a terminal Deezer client: log in with your ARL, browse
+// Command opendeezer is a terminal Deezer client: log in with your ARL, browse
 // liked songs / playlists / search, and stream — decrypt + decode + play all
 // locally. Your ARL never leaves your machine except in requests to Deezer.
 package main
@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Cycl0o0/DeezerTUI/internal/audio"
-	"github.com/Cycl0o0/DeezerTUI/internal/deezer"
-	"github.com/Cycl0o0/DeezerTUI/internal/ui"
+	"github.com/Cycl0o0/OpenDeezer/internal/audio"
+	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
+	"github.com/Cycl0o0/OpenDeezer/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -19,12 +19,12 @@ import (
 var version = "dev"
 
 func main() {
-	saveARL := flag.String("save-arl", "", "save this ARL to ~/.config/deezertui/arl.txt and exit")
+	saveARL := flag.String("save-arl", "", "save this ARL to ~/.config/opendeezer/arl.txt and exit")
 	showVer := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVer {
-		fmt.Println("deezertui", version)
+		fmt.Println("opendeezer", version)
 		return
 	}
 
@@ -40,7 +40,7 @@ func main() {
 	arl := ui.LoadARL()
 	if arl == "" {
 		fmt.Fprintln(os.Stderr, "No ARL found. Set $DEEZER_ARL or run:")
-		fmt.Fprintln(os.Stderr, "  deezertui -save-arl <your-arl>")
+		fmt.Fprintln(os.Stderr, "  opendeezer -save-arl <your-arl>")
 		fmt.Fprintln(os.Stderr, "\nYour ARL is the 'arl' cookie from an authenticated deezer.com session.")
 		os.Exit(1)
 	}

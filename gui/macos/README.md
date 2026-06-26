@@ -1,6 +1,6 @@
-# DeezerGUI (macOS)
+# OpenDeezer (macOS)
 
-Native SwiftUI front-end for DeezerTUI — an Apple-Music-style interface with a
+Native SwiftUI front-end for OpenDeezer — an Apple-Music-style interface with a
 Deezer-purple theme. The whole engine (login, browse, Blowfish decrypt, MP3
 decode, playback) is the Go core compiled to a C static archive
 (`Clib/libdeezercore.a`) and linked in-process; the Swift layer is UI only.
@@ -24,20 +24,20 @@ decode, playback) is the Go core compiled to a C static archive
 
 ```sh
 cd gui/macos
-make run          # builds the Go archive + app bundle, then opens Deezer.app
+make run          # builds the Go archive + app bundle, then opens OpenDeezer.app
 ```
 
 Targets: `make corelib` (Go → `Clib/libdeezercore.a`), `make build`
-(`swift build -c release`), `make app` (assemble `Deezer.app`), `make run`.
+(`swift build -c release`), `make app` (assemble `OpenDeezer.app`), `make run`.
 
 Needs **macOS 26 (Tahoe)** + Xcode 26 (Swift 6.2) for the Liquid Glass APIs, and
-Go 1.24+. ARL is read from `$DEEZER_ARL` or `~/.config/deezertui/arl.txt` (same
+Go 1.24+. ARL is read from `$DEEZER_ARL` or `~/.config/opendeezer/arl.txt` (same
 as the TUI).
 
 ## Architecture
 
 ```
-Sources/DeezerGUI/
+Sources/OpenDeezer/
   App.swift        sidebar, detail routing, hero header, track table, grid, search
   PlayerBar.swift  floating transport bar
   AppState.swift   @MainActor store; polls the engine; queue + shuffle/repeat
