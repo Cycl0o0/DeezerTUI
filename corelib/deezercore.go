@@ -12,13 +12,17 @@ package main
 
 /*
 #include <stdlib.h>
+#include <string.h>
 */
 import "C"
 
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
@@ -101,6 +105,38 @@ func jsonStr(v any, err error) *C.char {
 
 //export DZFree
 func DZFree(s *C.char) { C.free(unsafe.Pointer(s)) }
+
+// DZFetch downloads raw bytes (e.g. cover art) so GTK/Qt frontends don't need
+// their own HTTP stack. Returns a malloc'd buffer (free with DZFreeBytes) and
+// writes its length to outLen; returns NULL on error.
+//
+//export DZFetch
+func DZFetch(url *C.char, outLen *C.int) *C.uchar {
+	*outLen = 0
+	cl := &http.Client{Timeout: 15 * time.Second}
+	resp, err := cl.Get(C.GoString(url))
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	p := C.malloc(C.size_t(len(b)))
+	if p == nil {
+		return nil
+	}
+	C.memcpy(p, unsafe.Pointer(&b[0]), C.size_t(len(b)))
+	*outLen = C.int(len(b))
+	return (*C.uchar)(p)
+}
+
+//export DZFreeBytes
+func DZFreeBytes(p *C.uchar) { C.free(unsafe.Pointer(p)) }
 
 //export DZInit
 func DZInit(arl *C.char) C.int {
