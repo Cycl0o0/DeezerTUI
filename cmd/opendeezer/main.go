@@ -53,6 +53,7 @@ func main() {
 
 	ui.Version = version
 	client := deezer.New(arl)
+	client.SetQuality(ui.LoadQuality()) // apply persisted quality preference
 	model := ui.New(client, player)
 
 	p := tea.NewProgram(model, tea.WithAltScreen())

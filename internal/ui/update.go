@@ -214,6 +214,19 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "right":
 		m.player.SeekMS(m.player.PositionMS() + 10000)
 		return m, nil
+	case "h":
+		q := (m.client.Quality() + 1) % 3
+		m.client.SetQuality(q)
+		_ = SaveQuality(q)
+		switch q {
+		case 2:
+			m.status = "Audio quality: HiFi (FLAC, falls back to MP3)"
+		case 1:
+			m.status = "Audio quality: High (MP3 320)"
+		default:
+			m.status = "Audio quality: Normal (MP3 128)"
+		}
+		return m, nil
 	case "s":
 		m.player.Stop()
 		m.playing = false

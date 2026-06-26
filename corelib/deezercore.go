@@ -172,16 +172,35 @@ func DZLastErrorJSON() *C.char {
 	return jsonStr(map[string]string{"error": msg}, nil)
 }
 
+// DZSetQuality sets the stream quality level: 0=Normal(MP3 128), 1=High(MP3 320),
+// 2=HiFi(FLAC, falls back to MP3 if the account/track isn't entitled).
+//
 //export DZSetQuality
-func DZSetQuality(high C.int) {
+func DZSetQuality(level C.int) {
 	mu.Lock()
 	c := client
 	mu.Unlock()
 	if c != nil {
-		c.SetHighQuality(high != 0)
+		c.SetQuality(int(level))
 	}
 }
 
+// DZQuality returns the current quality level (0..2).
+//
+//export DZQuality
+func DZQuality() C.int {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c != nil {
+		return C.int(c.Quality())
+	}
+	return 0
+}
+
+// DZHighQuality reports whether quality is at least MP3_320 (kept for the
+// frontends that use a simple toggle; level 2 also counts as high).
+//
 //export DZHighQuality
 func DZHighQuality() C.int {
 	mu.Lock()

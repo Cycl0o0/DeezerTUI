@@ -148,7 +148,7 @@ func (m *Model) footer() string {
 		shuf = "on"
 	}
 	help := dim.Render(fmt.Sprintf(
-		"space pause · n/p next/prev · z shuffle:%s · r repeat:%s · +/- vol:%d%% · / search · c cover · ? credits · q quit",
+		"space pause · n/p next/prev · z shuffle:%s · r repeat:%s · +/- vol:%d%% · / search · h quality(N/H/HiFi) · c cover · ? credits · q quit",
 		shuf, m.repeat.String(), int(m.player.Volume()*100+0.5)))
 
 	status := ""

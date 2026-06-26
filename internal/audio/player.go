@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,12 +66,19 @@ type Player struct {
 	onFinish func()
 }
 
+// pcmStream is a decoder that yields interleaved s16 PCM and can seek by PCM
+// byte offset. Both *mp3.Decoder and *flacStream satisfy it.
+type pcmStream interface {
+	io.Reader
+	Seek(offset int64, whence int) (int64, error)
+}
+
 // seekSource is the io.Reader oto pulls from. It performs any requested seek on
-// the audio-output goroutine, inside the same lock as Read, so the go-mp3
-// decoder is never read and seeked concurrently (which aborts the process).
+// the audio-output goroutine, inside the same lock as Read, so the decoder is
+// never read and seeked concurrently (which aborts the process).
 type seekSource struct {
 	p       *Player
-	dec     *mp3.Decoder
+	dec     pcmStream
 	mu      sync.Mutex
 	pending int64 // PCM byte offset to seek to, or -1 for none
 }
@@ -192,7 +200,14 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 		p.fail(err)
 		return err
 	}
-	decoder, err := mp3.NewDecoder(bytes.NewReader(mp3bytes))
+	// Decrypt yields the raw codec bytes; pick the decoder by the resolved
+	// format (FLAC for HiFi, else MP3). Both decode to s16 stereo PCM.
+	var decoder pcmStream
+	if strings.Contains(strings.ToUpper(plan.Format), "FLAC") {
+		decoder, err = newFLACStream(mp3bytes)
+	} else {
+		decoder, err = mp3.NewDecoder(bytes.NewReader(mp3bytes))
+	}
 	if err != nil {
 		p.fail(err)
 		return err

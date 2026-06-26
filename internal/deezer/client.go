@@ -30,21 +30,43 @@ type Client struct {
 	licenseToken string
 	sid          string
 	userID       string
-	quality      int32 // 0 = MP3_128 (default), 1 = MP3_320 — set atomically
+	quality      int32 // 0=MP3_128, 1=MP3_320, 2=FLAC (lossless) — set atomically
 	http         *http.Client
 }
 
-// SetHighQuality selects MP3_320 (true) or MP3_128 (false) for new streams.
-func (c *Client) SetHighQuality(high bool) {
-	var v int32
-	if high {
-		v = 1
+// Quality levels.
+const (
+	QualityNormal = 0 // MP3 128
+	QualityHigh   = 1 // MP3 320
+	QualityLossless = 2 // FLAC (HiFi) — falls back to MP3 if unavailable
+)
+
+// SetQuality selects the preferred stream quality (0..2). Deezer returns the
+// first format the account+track is entitled to, so an unentitled FLAC/320
+// automatically falls back to a lower MP3 format.
+func (c *Client) SetQuality(q int) {
+	if q < 0 {
+		q = 0
+	} else if q > 2 {
+		q = 2
 	}
-	atomic.StoreInt32(&c.quality, v)
+	atomic.StoreInt32(&c.quality, int32(q))
 }
 
-// HighQuality reports whether MP3_320 is preferred.
-func (c *Client) HighQuality() bool { return atomic.LoadInt32(&c.quality) == 1 }
+// Quality returns the current preference (0..2).
+func (c *Client) Quality() int { return int(atomic.LoadInt32(&c.quality)) }
+
+// SetHighQuality keeps the old bool API: true => MP3_320, false => MP3_128.
+func (c *Client) SetHighQuality(high bool) {
+	if high {
+		c.SetQuality(QualityHigh)
+	} else {
+		c.SetQuality(QualityNormal)
+	}
+}
+
+// HighQuality reports whether the preference is at least MP3_320.
+func (c *Client) HighQuality() bool { return c.Quality() >= QualityHigh }
 
 // New builds a client for the given ARL (not yet logged in).
 func New(arl string) *Client {
@@ -465,11 +487,17 @@ func (c *Client) resolveMediaURL(trackToken string) (urlStr, format string, err 
 	if c.licenseToken == "" || trackToken == "" {
 		return "", "", fmt.Errorf("missing license or track token")
 	}
-	// Format order is preference order (Deezer returns the first entitled one).
-	// High quality prefers MP3_320, else MP3_128 for bandwidth.
-	formats := `{"cipher":"BF_CBC_STRIPE","format":"MP3_128"},{"cipher":"BF_CBC_STRIPE","format":"MP3_320"}`
-	if atomic.LoadInt32(&c.quality) == 1 {
-		formats = `{"cipher":"BF_CBC_STRIPE","format":"MP3_320"},{"cipher":"BF_CBC_STRIPE","format":"MP3_128"}`
+	// Format order is preference order — Deezer serves the first format the
+	// account+track is entitled to, giving automatic fallback.
+	const f128 = `{"cipher":"BF_CBC_STRIPE","format":"MP3_128"}`
+	const f320 = `{"cipher":"BF_CBC_STRIPE","format":"MP3_320"}`
+	const fflac = `{"cipher":"BF_CBC_STRIPE","format":"FLAC"}`
+	formats := f128 + "," + f320 // Normal: prefer 128
+	switch atomic.LoadInt32(&c.quality) {
+	case QualityHigh:
+		formats = f320 + "," + f128
+	case QualityLossless:
+		formats = fflac + "," + f320 + "," + f128 // HiFi, fall back to MP3
 	}
 	body := fmt.Sprintf(`{"license_token":"%s","media":[{"type":"FULL","formats":[%s]}],`+
 		`"track_tokens":["%s"]}`, c.licenseToken, formats, trackToken)
