@@ -255,7 +255,7 @@ static std::wstring LoadArl() {
 //  MainWindow -- a code-built Window. Implemented as a winrt::implements type so
 //  coroutines can hold get_strong() and events can bind get_weak()/member fns.
 // =============================================================================
-struct MainWindow : winrt::implements<MainWindow, IInspectable> {
+struct MainWindow : winrt::implements<MainWindow, wf::IInspectable> {
     MainWindow() { LoadSettings(); BuildUi(); }
 
     void Activate() {
@@ -685,26 +685,26 @@ private:
     }
 
     // ---- item activation ----------------------------------------------------
-    static int TagIndex(IInspectable const& clicked) {
+    static int TagIndex(wf::IInspectable const& clicked) {
         auto fe = clicked.try_as<mux::FrameworkElement>();
         return fe ? unbox_value_or<int>(fe.Tag(), -1) : -1;
     }
-    void OnTrackClick(IInspectable const&, muxc::ItemClickEventArgs const& e) {
+    void OnTrackClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
         int i = TagIndex(e.ClickedItem()); if (i >= 0) PlayFrom(m_tracks, i);
     }
-    void OnSearchTrackClick(IInspectable const&, muxc::ItemClickEventArgs const& e) {
+    void OnSearchTrackClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
         int i = TagIndex(e.ClickedItem()); if (i >= 0) PlayFrom(m_searchTracks, i);
     }
-    void OnPlaylistClick(IInspectable const&, muxc::ItemClickEventArgs const& e) {
+    void OnPlaylistClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
         int i = TagIndex(e.ClickedItem());
         if (i >= 0 && i < static_cast<int>(m_playlists.size())) OpenPlaylist(m_playlists[i]);
     }
-    void OnSearchGridClick(IInspectable const&, muxc::ItemClickEventArgs const& e) {
+    void OnSearchGridClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
         int i = TagIndex(e.ClickedItem());
         if (i >= 0 && i < static_cast<int>(m_searchActions.size())) m_searchActions[i]();
     }
-    void OnSearchClick(IInspectable const&, mux::RoutedEventArgs const&) { RunSearch(); }
-    void OnSearchKey(IInspectable const&, muxin::KeyRoutedEventArgs const& e) {
+    void OnSearchClick(wf::IInspectable const&, mux::RoutedEventArgs const&) { RunSearch(); }
+    void OnSearchKey(wf::IInspectable const&, muxin::KeyRoutedEventArgs const& e) {
         if (e.Key() == wsys::VirtualKey::Enter) RunSearch();
     }
 
@@ -758,30 +758,30 @@ private:
         if (m_queueIndex > 0) --m_queueIndex;
         PlayCurrent();
     }
-    void OnPlayPause(IInspectable const&, mux::RoutedEventArgs const&) { DZTogglePause(); }
-    void OnPrev(IInspectable const&, mux::RoutedEventArgs const&) { Prev(); }
-    void OnNext(IInspectable const&, mux::RoutedEventArgs const&) { Next(); }
-    void OnShuffle(IInspectable const&, mux::RoutedEventArgs const&) {
+    void OnPlayPause(wf::IInspectable const&, mux::RoutedEventArgs const&) { DZTogglePause(); }
+    void OnPrev(wf::IInspectable const&, mux::RoutedEventArgs const&) { Prev(); }
+    void OnNext(wf::IInspectable const&, mux::RoutedEventArgs const&) { Next(); }
+    void OnShuffle(wf::IInspectable const&, mux::RoutedEventArgs const&) {
         auto r = m_shuffleBtn.IsChecked(); m_shuffle = r && r.Value();
     }
-    void OnRepeat(IInspectable const&, mux::RoutedEventArgs const&) {
+    void OnRepeat(wf::IInspectable const&, mux::RoutedEventArgs const&) {
         m_repeat = (m_repeat + 1) % 3;
         m_repeatBtn.Content(box_value(m_repeat == 0 ? L"Repeat: Off" : m_repeat == 1 ? L"Repeat: All" : L"Repeat: One"));
     }
-    void OnSeekChanged(IInspectable const&, muxp::RangeBaseValueChangedEventArgs const& e) {
+    void OnSeekChanged(wf::IInspectable const&, muxp::RangeBaseValueChangedEventArgs const& e) {
         if (m_updatingSeek) return; // programmatic update from the poll tick
         int64_t ms = static_cast<int64_t>(llround(e.NewValue()));
         DZSeek(ms);
         m_posText.Text(TimeText(ms));
         m_lastSeek = std::chrono::steady_clock::now();
     }
-    void OnVolumeChanged(IInspectable const&, muxp::RangeBaseValueChangedEventArgs const& e) {
+    void OnVolumeChanged(wf::IInspectable const&, muxp::RangeBaseValueChangedEventArgs const& e) {
         if (m_updatingVol) return;
         DZSetVolume(e.NewValue() / 100.0);
     }
 
     // ---- 300 ms poll: cheap state reads + auto-advance + SMTC push ----------
-    void OnTick(mud::DispatcherQueueTimer const&, IInspectable const&) {
+    void OnTick(mud::DispatcherQueueTimer const&, wf::IInspectable const&) {
         if (!m_loggedIn) return;
         int st = DZState();
         int64_t pos = DZPositionMS(), dur = DZDurationMS();
