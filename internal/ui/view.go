@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
+	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -90,6 +91,9 @@ func (m *Model) nowPlayingView() string {
 			"",
 			dim.Render(m.player.State().String()),
 		}
+		if f := deezer.FormatLabel(m.player.Format()); f != "" {
+			meta = append(meta, dim.Render("Output: "+f))
+		}
 	} else {
 		meta = []string{dim.Render("Nothing playing.")}
 	}
@@ -135,6 +139,9 @@ func (m *Model) footer() string {
 		}
 		now = fmt.Sprintf("%s %s %s",
 			icon, accent.Render(t.Name), dim.Render("· "+t.ArtistLine()))
+		if f := deezer.FormatLabel(m.player.Format()); f != "" {
+			now += dim.Render("  [" + f + "]")
+		}
 	} else if e := m.player.LastError(); e != "" {
 		now = dim.Render("⏹ stopped — " + e)
 	} else {

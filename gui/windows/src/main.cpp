@@ -4,8 +4,8 @@
 // playback) is the Go core compiled to a C-ABI shared library
 // (lib/libdeezercore.dll) and called in-process over extern "C". This file is
 // UI only: an entirely code-built NavigationView + track ListView + playlist /
-// search grids + a bottom now-playing transport bar + an About dialog. No XAML
-// markup, no .idl, no markup compiler -- the App subclass implements
+// search grids + a bottom now-playing transport bar + About/Settings dialogs.
+// No XAML markup, no .idl, no markup compiler -- the App subclass implements
 // IXamlMetadataProvider so default control themes resolve.
 //
 // Every blocking DZ* call (DZInit / browse / DZPlay / DZFetch) runs on a
@@ -13,8 +13,19 @@
 // UI thread with winrt::resume_foreground(DispatcherQueue). A single 300 ms
 // DispatcherQueueTimer polls cheap player state and auto-advances when
 // DZFinishedCount() increments.
+//
+// OS integration (added):
+//   * SystemMediaTransportControls (SMTC) -- the system media overlay / lock
+//     screen / media keys. Acquired via ISystemMediaTransportControlsInterop::
+//     GetForWindow(hwnd) and wired straight to the EXISTING transport handlers;
+//     DisplayUpdater + Timeline are pushed on track change and from the poll.
+//   * Settings ContentDialog -- audio quality (MP3_128 / MP3_320 -> DZSetQuality)
+//     and a close-to-tray toggle, persisted to %APPDATA%\opendeezer\settings.json.
+//   * Tray icon (Shell_NotifyIcon) -- close-to-tray keeps the engine playing in
+//     the background; the tray menu restores the window or quits.
 
 #include <windows.h>
+#include <shellapi.h>
 #undef GetCurrentTime
 #undef GetMessage
 
@@ -27,6 +38,7 @@
 #include <winrt/Windows.Data.Json.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Graphics.h>
+#include <winrt/Windows.Media.h>
 #include <winrt/Windows.UI.Xaml.Interop.h>
 
 #include <winrt/Microsoft.UI.h>
@@ -39,6 +51,9 @@
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
+
+#include <microsoft.ui.xaml.window.h>             // IWindowNative (HWND from Window)
+#include <systemmediatransportcontrolsinterop.h>  // ISystemMediaTransportControlsInterop
 
 #include <string>
 #include <vector>
@@ -73,6 +88,10 @@ extern "C" {
     void           DZFree(char* s);
     unsigned char* DZFetch(char* url, int* outLen);   // raw bytes (cover art); blocks
     void           DZFreeBytes(unsigned char* p);
+    void           DZSetQuality(int level);           // 0=MP3_128,1=MP3_320,2=FLAC
+    int            DZHighQuality(void);               // 1 if at least MP3_320
+    int            DZQuality(void);                   // current level 0..2
+    char*          DZFormat(void);                    // human label of current stream
 }
 
 // ---- namespace aliases ------------------------------------------------------
@@ -84,10 +103,13 @@ namespace muxi  = winrt::Microsoft::UI::Xaml::Media::Imaging;
 namespace muxk  = winrt::Microsoft::UI::Xaml::Markup;
 namespace muxin = winrt::Microsoft::UI::Xaml::Input;
 namespace mud   = winrt::Microsoft::UI::Dispatching;
+namespace muw   = winrt::Microsoft::UI::Windowing;
 namespace wdj   = winrt::Windows::Data::Json;
 namespace wss   = winrt::Windows::Storage::Streams;
 namespace wut   = winrt::Windows::UI::Text;
 namespace wsys  = winrt::Windows::System;
+namespace wm    = winrt::Windows::Media;
+namespace wf    = winrt::Windows::Foundation;
 using IInspectable = winrt::Windows::Foundation::IInspectable;
 using winrt::box_value;
 using winrt::unbox_value_or;
@@ -100,6 +122,9 @@ using winrt::fire_and_forget;
 struct Track    { hstring id, name, artistLine, albumName, artworkUrl; int64_t durationMs = 0; };
 struct Album    { hstring id, name, artistLine, artworkUrl; };
 struct Playlist { hstring id, name, owner, artworkUrl; int trackCount = 0; };
+
+// ---- persisted settings -----------------------------------------------------
+struct Settings { int quality = 1; bool closeToTray = true; }; // quality: 0 Normal,1 High,2 HiFi
 
 // ---- small helpers ----------------------------------------------------------
 static hstring TakeJson(char* p) {              // own a DZ*JSON result, copy, release
@@ -180,6 +205,15 @@ static void Trim(std::wstring& s) {
     s = s.substr(b, e - b);
 }
 
+// %APPDATA%\opendeezer  -- the app config dir (holds arl.txt + settings.json).
+static std::wstring ConfigDir() {
+    wchar_t buf[8192];
+    DWORD m = GetEnvironmentVariableW(L"APPDATA", buf, 8192);
+    if (m > 0 && m < 8192) { std::wstring p(buf, m); p += L"\\opendeezer"; return p; }
+    return L"";
+}
+static std::wstring SettingsPath() { auto d = ConfigDir(); return d.empty() ? L"" : d + L"\\settings.json"; }
+
 // ARL: %DEEZER_ARL% first, then %APPDATA%\opendeezer\arl.txt.
 static std::wstring LoadArl() {
     wchar_t buf[8192];
@@ -205,15 +239,21 @@ static std::wstring LoadArl() {
 //  coroutines can hold get_strong() and events can bind get_weak()/member fns.
 // =============================================================================
 struct MainWindow : winrt::implements<MainWindow, IInspectable> {
-    MainWindow() { BuildUi(); }
+    MainWindow() { LoadSettings(); BuildUi(); }
 
     void Activate() {
         m_win.Activate();
         // The poll timer + login both need the live DispatcherQueue / XamlRoot,
-        // so they start after the window is up.
+        // so they start after the window is up. The HWND only exists post-Activate,
+        // so SMTC + tray are set up here too.
         m_timer = m_win.DispatcherQueue().CreateTimer();
         m_timer.Interval(std::chrono::milliseconds(300));
         m_timer.Tick({ get_weak(), &MainWindow::OnTick });
+        m_win.try_as<::IWindowNative>()->get_WindowHandle(&m_appHwnd);
+        SetupSMTC();
+        SetupTray();
+        // Close-to-tray: intercept the window's close button.
+        m_win.AppWindow().Closing({ get_weak(), &MainWindow::OnClosing });
         StartLogin();
     }
 
@@ -269,7 +309,9 @@ private:
         m_nav.MenuItems().Append(m_playlistsItem);
         m_nav.MenuItems().Append(m_searchItem);
 
-        m_aboutItem = NavItem(L"About", muxc::Symbol::Help, L"about");
+        m_settingsItem = NavItem(L"Settings", muxc::Symbol::Setting, L"settings");
+        m_aboutItem    = NavItem(L"About",    muxc::Symbol::Help,    L"about");
+        m_nav.FooterMenuItems().Append(m_settingsItem);
         m_nav.FooterMenuItems().Append(m_aboutItem);
 
         m_nav.SelectionChanged({ get_weak(), &MainWindow::OnNav });
@@ -363,10 +405,10 @@ private:
 
         muxc::StackPanel tr; tr.Orientation(muxc::Orientation::Horizontal); tr.Spacing(4); tr.VerticalAlignment(mux::VerticalAlignment::Center);
         auto glyphBtn = [](hstring g) { muxc::Button b; muxc::FontIcon fi; fi.Glyph(g); b.Content(fi); return b; };
-        auto prevBtn = glyphBtn(L""); prevBtn.Click({ get_weak(), &MainWindow::OnPrev });
-        m_playBtn = muxc::Button(); m_playIcon = muxc::FontIcon(); m_playIcon.Glyph(L""); m_playBtn.Content(m_playIcon);
+        auto prevBtn = glyphBtn(L""); prevBtn.Click({ get_weak(), &MainWindow::OnPrev });
+        m_playBtn = muxc::Button(); m_playIcon = muxc::FontIcon(); m_playIcon.Glyph(L""); m_playBtn.Content(m_playIcon);
         m_playBtn.Foreground(m_accent); m_playBtn.Click({ get_weak(), &MainWindow::OnPlayPause });
-        auto nextBtn = glyphBtn(L""); nextBtn.Click({ get_weak(), &MainWindow::OnNext });
+        auto nextBtn = glyphBtn(L""); nextBtn.Click({ get_weak(), &MainWindow::OnNext });
         tr.Children().Append(prevBtn); tr.Children().Append(m_playBtn); tr.Children().Append(nextBtn);
         muxc::Grid::SetColumn(tr, 2); bar.Children().Append(tr);
 
@@ -382,7 +424,7 @@ private:
         muxc::Grid::SetColumn(m_durText, 5); bar.Children().Append(m_durText);
 
         muxc::StackPanel modes; modes.Orientation(muxc::Orientation::Horizontal); modes.Spacing(4); modes.VerticalAlignment(mux::VerticalAlignment::Center);
-        m_shuffleBtn = muxp::ToggleButton(); { muxc::FontIcon fi; fi.Glyph(L""); m_shuffleBtn.Content(fi); }
+        m_shuffleBtn = muxp::ToggleButton(); { muxc::FontIcon fi; fi.Glyph(L""); m_shuffleBtn.Content(fi); }
         m_shuffleBtn.Click({ get_weak(), &MainWindow::OnShuffle });
         m_repeatBtn = muxc::Button(); m_repeatBtn.Content(box_value(L"Repeat: Off"));
         m_repeatBtn.Click({ get_weak(), &MainWindow::OnRepeat });
@@ -390,7 +432,7 @@ private:
         muxc::Grid::SetColumn(modes, 6); bar.Children().Append(modes);
 
         muxc::StackPanel vol; vol.Orientation(muxc::Orientation::Horizontal); vol.Spacing(6); vol.VerticalAlignment(mux::VerticalAlignment::Center);
-        { muxc::FontIcon sp; sp.Glyph(L""); sp.VerticalAlignment(mux::VerticalAlignment::Center); vol.Children().Append(sp); }
+        { muxc::FontIcon sp; sp.Glyph(L""); sp.VerticalAlignment(mux::VerticalAlignment::Center); vol.Children().Append(sp); }
         m_volume = muxc::Slider(); m_volume.Minimum(0); m_volume.Maximum(100); m_volume.Value(100); m_volume.Width(120);
         m_volume.VerticalAlignment(mux::VerticalAlignment::Center); m_volume.Foreground(m_accent);
         m_volume.ValueChanged({ get_weak(), &MainWindow::OnVolumeChanged });
@@ -517,6 +559,7 @@ private:
         co_await winrt::resume_foreground(m_win.DispatcherQueue());
         if (ok) {
             m_loggedIn = true;
+            DZSetQuality(m_settings.quality); // apply persisted quality on startup
             m_lastFinished = DZFinishedCount();
             m_updatingVol = true; m_volume.Value(DZVolume() * 100.0); m_updatingVol = false;
             m_timer.Start();
@@ -536,8 +579,9 @@ private:
         auto item = args.SelectedItem().try_as<muxc::NavigationViewItem>();
         if (!item) return;
         auto tag = unbox_value_or<hstring>(item.Tag(), L"");
-        if (tag == L"about") {
-            ShowAbout();
+        // About / Settings are modal dialogs, not pages: open then revert selection.
+        if (tag == L"about" || tag == L"settings") {
+            if (tag == L"about") ShowAbout(); else ShowSettings();
             m_suppressNav = true;
             nav.SelectedItem(m_lastContentItem ? m_lastContentItem : m_likedItem);
             m_suppressNav = false;
@@ -671,10 +715,13 @@ private:
     }
     void SetNowPlaying(Track const& t) {
         m_nowTitle.Text(t.name);
+        m_curArtist = t.artistLine;
         m_nowArtist.Text(t.artistLine);
         m_cover.Source(nullptr);
         int token = ++m_playGen;
         if (!t.artworkUrl.empty()) LoadArt(m_cover, t.artworkUrl, token, true);
+        // Push the new track to the OS media overlay / lock screen.
+        UpdateSmtcMetadata(t);
     }
     void Next() {
         if (m_queue.empty()) return;
@@ -716,7 +763,7 @@ private:
         DZSetVolume(e.NewValue() / 100.0);
     }
 
-    // ---- 300 ms poll: cheap state reads + auto-advance ----------------------
+    // ---- 300 ms poll: cheap state reads + auto-advance + SMTC push ----------
     void OnTick(mud::DispatcherQueueTimer const&, IInspectable const&) {
         if (!m_loggedIn) return;
         int st = DZState();
@@ -736,9 +783,231 @@ private:
             m_updatingSeek = false;
         }
         m_posText.Text(TimeText(pos));
-        m_playIcon.Glyph(st == 2 ? L"" : L""); // pause glyph while playing
+        m_playIcon.Glyph(st == 2 ? L"" : L""); // pause glyph while playing
+
+        // Show the actual output format next to the artist.
+        if (!m_curArtist.empty()) {
+            if (char* fp = DZFormat()) {
+                hstring f = to_hstring(std::string(fp));
+                DZFree(fp);
+                m_nowArtist.Text(f.empty() ? m_curArtist
+                                           : hstring(m_curArtist + L"   ·   " + f));
+            }
+        }
+
+        // Mirror state to the OS overlay: status on change, timeline ~every 5 s.
+        if (m_smtc) {
+            wm::MediaPlaybackStatus ps =
+                st == 2 ? wm::MediaPlaybackStatus::Playing :
+                st == 3 ? wm::MediaPlaybackStatus::Paused  :
+                st == 1 ? wm::MediaPlaybackStatus::Changing :
+                          wm::MediaPlaybackStatus::Stopped;
+            if (ps != m_lastSmtcStatus) { try { m_smtc.PlaybackStatus(ps); } catch (...) {} m_lastSmtcStatus = ps; }
+            if (++m_smtcTimelineTick >= 16) { m_smtcTimelineTick = 0; UpdateSmtcTimeline(pos, dur); }
+        }
+
         int f = DZFinishedCount();
         if (f != m_lastFinished) { m_lastFinished = f; if (m_repeat == 2) PlayCurrent(); else Next(); }
+    }
+
+    // ---- SystemMediaTransportControls (OS media overlay / media keys) -------
+    void SetupSMTC() {
+        try {
+            auto interop = winrt::get_activation_factory<
+                wm::SystemMediaTransportControls, ::ISystemMediaTransportControlsInterop>();
+            winrt::check_hresult(interop->GetForWindow(
+                m_appHwnd,
+                winrt::guid_of<wm::SystemMediaTransportControls>(),
+                winrt::put_abi(m_smtc)));
+        } catch (...) { m_smtc = nullptr; return; }
+
+        m_smtc.IsEnabled(true);
+        m_smtc.IsPlayEnabled(true);  m_smtc.IsPauseEnabled(true);
+        m_smtc.IsNextEnabled(true);  m_smtc.IsPreviousEnabled(true);
+        m_smtc.DisplayUpdater().Type(wm::MediaPlaybackType::Music);
+
+        // Handlers run on a threadpool thread -> marshal to the UI thread, then
+        // route into the EXISTING transport logic (no duplicated playback code).
+        m_smtcButtonToken = m_smtc.ButtonPressed({ get_weak(), &MainWindow::OnSmtcButton });
+        m_smtcPosToken    = m_smtc.PlaybackPositionChangeRequested({ get_weak(), &MainWindow::OnSmtcSeek });
+    }
+
+    void OnSmtcButton(wm::SystemMediaTransportControls const&,
+                      wm::SystemMediaTransportControlsButtonPressedEventArgs const& a) {
+        auto btn = a.Button();
+        m_win.DispatcherQueue().TryEnqueue([weak = get_weak(), btn] {
+            auto self = weak.get(); if (!self) return;
+            switch (btn) {
+                case wm::SystemMediaTransportControlsButton::Play:     DZResume(); break;
+                case wm::SystemMediaTransportControlsButton::Pause:    DZPause();  break;
+                case wm::SystemMediaTransportControlsButton::Next:     self->Next(); break;
+                case wm::SystemMediaTransportControlsButton::Previous: self->Prev(); break;
+                default: break;
+            }
+        });
+    }
+
+    void OnSmtcSeek(wm::SystemMediaTransportControls const&,
+                    wm::PlaybackPositionChangeRequestedEventArgs const& a) {
+        int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            a.RequestedPlaybackPosition()).count();
+        m_win.DispatcherQueue().TryEnqueue([weak = get_weak(), ms] {
+            auto self = weak.get(); if (!self) return;
+            DZSeek(ms);
+            self->m_lastSeek = std::chrono::steady_clock::now();
+            self->m_updatingSeek = true; self->m_seek.Value(static_cast<double>(ms)); self->m_updatingSeek = false;
+            self->m_posText.Text(TimeText(ms));
+            self->UpdateSmtcTimeline(ms, static_cast<int64_t>(self->m_seek.Maximum()));
+        });
+    }
+
+    void UpdateSmtcMetadata(Track const& t) {
+        if (!m_smtc) return;
+        try {
+            auto du = m_smtc.DisplayUpdater();
+            du.Type(wm::MediaPlaybackType::Music);
+            auto mp = du.MusicProperties();
+            mp.Title(t.name);
+            mp.Artist(t.artistLine);
+            mp.AlbumTitle(t.albumName);
+            if (!t.artworkUrl.empty()) {
+                du.Thumbnail(wss::RandomAccessStreamReference::CreateFromUri(wf::Uri(t.artworkUrl)));
+            }
+            du.Update();
+            m_smtc.PlaybackStatus(wm::MediaPlaybackStatus::Playing);
+            m_lastSmtcStatus = wm::MediaPlaybackStatus::Playing;
+            UpdateSmtcTimeline(0, t.durationMs);
+            m_smtcTimelineTick = 0;
+        } catch (...) {}
+    }
+
+    void UpdateSmtcTimeline(int64_t posMs, int64_t durMs) {
+        if (!m_smtc) return;
+        try {
+            wm::SystemMediaTransportControlsTimelineProperties tl;
+            std::chrono::milliseconds end(durMs > 0 ? durMs : 0);
+            tl.StartTime(std::chrono::milliseconds(0));
+            tl.EndTime(end);
+            tl.Position(std::chrono::milliseconds(posMs < 0 ? 0 : posMs));
+            tl.MinSeekTime(std::chrono::milliseconds(0));
+            tl.MaxSeekTime(end);
+            m_smtc.UpdateTimelineProperties(tl);
+        } catch (...) {}
+    }
+
+    // ---- tray icon + close-to-tray (background playback) --------------------
+    void SetupTray() {
+        WNDCLASSEXW wc{};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = &MainWindow::TrayProc;
+        wc.hInstance     = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"OpenDeezerTrayWnd";
+        RegisterClassExW(&wc); // harmless if already registered
+
+        // Message-only window receives the tray callbacks + menu commands.
+        m_msgHwnd = CreateWindowExW(0, wc.lpszClassName, L"OpenDeezerTray", 0,
+            0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+        if (m_msgHwnd) SetWindowLongPtrW(m_msgHwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+        HICON hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),
+            MAKEINTRESOURCEW(1), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED));
+        if (!hIcon) hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+
+        m_nid = {};
+        m_nid.cbSize           = sizeof(m_nid);
+        m_nid.hWnd             = m_msgHwnd;
+        m_nid.uID              = kTrayUID;
+        m_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        m_nid.uCallbackMessage = kTrayCallback;
+        m_nid.hIcon            = hIcon;
+        wcscpy_s(m_nid.szTip, L"OpenDeezer");
+        Shell_NotifyIconW(NIM_ADD, &m_nid);
+        m_trayAdded = true;
+    }
+
+    void RemoveTray() {
+        if (m_trayAdded) { Shell_NotifyIconW(NIM_DELETE, &m_nid); m_trayAdded = false; }
+    }
+
+    void RestoreWindow() {
+        try {
+            m_win.AppWindow().Show();
+            m_win.Activate();
+            SetForegroundWindow(m_appHwnd);
+        } catch (...) {}
+    }
+
+    void ShowTrayMenu() {
+        HMENU menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING, kMenuRestore, L"Open OpenDeezer");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kMenuQuit, L"Quit");
+        POINT p; GetCursorPos(&p);
+        SetForegroundWindow(m_msgHwnd); // so the menu dismisses on focus loss
+        TrackPopupMenu(menu, TPM_RIGHTBUTTON, p.x, p.y, 0, m_msgHwnd, nullptr);
+        DestroyMenu(menu);
+    }
+
+    void QuitApp() {
+        m_quitting = true;
+        RemoveTray();
+        if (m_smtc) { try { m_smtc.IsEnabled(false); } catch (...) {} }
+        try { mux::Application::Current().Exit(); } catch (...) {}
+    }
+
+    // Close button: honor close-to-tray (keep engine playing in the background).
+    void OnClosing(muw::AppWindow const&, muw::AppWindowClosingEventArgs const& args) {
+        if (m_quitting) return;
+        if (m_settings.closeToTray) {
+            args.Cancel(true);
+            try { m_win.AppWindow().Hide(); } catch (...) {}
+        } else {
+            RemoveTray(); // real close -> let the process exit
+        }
+    }
+
+    static LRESULT CALLBACK TrayProc(HWND h, UINT msg, WPARAM w, LPARAM l) {
+        auto self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+        if (self && msg == kTrayCallback) {
+            switch (LOWORD(l)) {
+                case WM_LBUTTONDBLCLK: self->RestoreWindow(); break;
+                case WM_RBUTTONUP:
+                case WM_CONTEXTMENU:   self->ShowTrayMenu();  break;
+            }
+            return 0;
+        }
+        if (self && msg == WM_COMMAND) {
+            switch (LOWORD(w)) {
+                case kMenuRestore: self->RestoreWindow(); break;
+                case kMenuQuit:    self->QuitApp();       break;
+            }
+            return 0;
+        }
+        return DefWindowProcW(h, msg, w, l);
+    }
+
+    // ---- settings persistence ----------------------------------------------
+    void LoadSettings() {
+        auto path = SettingsPath(); if (path.empty()) return;
+        std::ifstream f(path.c_str(), std::ios::binary);
+        if (!f) return;
+        std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        wdj::JsonObject o{ nullptr };
+        if (wdj::JsonObject::TryParse(to_hstring(s), o)) {
+            m_settings.quality = (int)o.GetNamedNumber(L"quality", (double)m_settings.quality);
+            m_settings.closeToTray = o.GetNamedBoolean(L"closeToTray", m_settings.closeToTray);
+        }
+    }
+
+    void SaveSettings() {
+        auto dir = ConfigDir(); if (dir.empty()) return;
+        CreateDirectoryW(dir.c_str(), nullptr);
+        wdj::JsonObject o;
+        o.SetNamedValue(L"quality", wdj::JsonValue::CreateNumberValue(m_settings.quality));
+        o.SetNamedValue(L"closeToTray", wdj::JsonValue::CreateBooleanValue(m_settings.closeToTray));
+        std::string s = to_string(o.Stringify());
+        std::ofstream f(SettingsPath().c_str(), std::ios::binary | std::ios::trunc);
+        if (f) f.write(s.data(), static_cast<std::streamsize>(s.size()));
     }
 
     // ---- dialogs ------------------------------------------------------------
@@ -751,6 +1020,51 @@ private:
         dlg.Content(t);
         dlg.CloseButtonText(L"OK");
         co_await dlg.ShowAsync();
+    }
+
+    fire_and_forget ShowSettings() {
+        auto strong = get_strong();
+        muxc::ContentDialog dlg;
+        dlg.XamlRoot(m_win.Content().XamlRoot());
+        dlg.Title(box_value(L"Settings"));
+
+        muxc::StackPanel sp; sp.Spacing(18); sp.MinWidth(360);
+
+        // Audio quality
+        muxc::StackPanel qsec; qsec.Spacing(4);
+        muxc::TextBlock qh; qh.Text(L"Audio quality"); qh.FontWeight(wut::FontWeights::SemiBold());
+        muxc::ComboBox quality;
+        quality.Items().Append(box_value(L"Normal — MP3 128 kbps"));
+        quality.Items().Append(box_value(L"High — MP3 320 kbps"));
+        quality.Items().Append(box_value(L"HiFi — FLAC lossless (falls back to MP3)"));
+        quality.SelectedIndex(m_settings.quality);
+        quality.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
+        qsec.Children().Append(qh); qsec.Children().Append(quality);
+
+        // Background / close-to-tray
+        muxc::StackPanel tsec; tsec.Spacing(4);
+        muxc::TextBlock th; th.Text(L"Background playback"); th.FontWeight(wut::FontWeights::SemiBold());
+        muxc::ToggleSwitch tray;
+        tray.OnContent(box_value(L"Closing the window keeps playing in the tray"));
+        tray.OffContent(box_value(L"Closing the window quits OpenDeezer"));
+        tray.IsOn(m_settings.closeToTray);
+        tsec.Children().Append(th); tsec.Children().Append(tray);
+
+        sp.Children().Append(qsec);
+        sp.Children().Append(tsec);
+        dlg.Content(sp);
+        dlg.PrimaryButtonText(L"Save");
+        dlg.CloseButtonText(L"Cancel");
+        dlg.DefaultButton(muxc::ContentDialogButton::Primary);
+
+        auto res = co_await dlg.ShowAsync();
+        if (res == muxc::ContentDialogResult::Primary) {
+            int lvl = quality.SelectedIndex();
+            m_settings.quality = lvl < 0 ? 0 : (lvl > 2 ? 2 : lvl);
+            m_settings.closeToTray = tray.IsOn();
+            DZSetQuality(m_settings.quality); // applies to the NEXT track
+            SaveSettings();
+        }
     }
 
     fire_and_forget ShowAbout() {
@@ -779,7 +1093,7 @@ private:
 
     muxc::NavigationView m_nav{ nullptr };
     muxc::NavigationViewItem m_likedItem{ nullptr }, m_playlistsItem{ nullptr }, m_searchItem{ nullptr },
-                             m_aboutItem{ nullptr }, m_lastContentItem{ nullptr };
+                             m_settingsItem{ nullptr }, m_aboutItem{ nullptr }, m_lastContentItem{ nullptr };
 
     mux::UIElement m_tracksPage{ nullptr }, m_playlistsPage{ nullptr }, m_searchPage{ nullptr };
     muxc::ListView m_trackList{ nullptr }, m_searchTrackList{ nullptr };
@@ -788,6 +1102,7 @@ private:
 
     muxc::Image     m_cover{ nullptr };
     muxc::TextBlock m_nowTitle{ nullptr }, m_nowArtist{ nullptr }, m_posText{ nullptr }, m_durText{ nullptr };
+    hstring m_curArtist; // base artist line; format badge is appended each tick
     muxc::Slider    m_seek{ nullptr }, m_volume{ nullptr };
     muxc::Button    m_playBtn{ nullptr }, m_repeatBtn{ nullptr };
     muxc::FontIcon  m_playIcon{ nullptr };
@@ -801,6 +1116,22 @@ private:
     bool m_loggedIn = false, m_shuffle = false, m_updatingSeek = false, m_updatingVol = false, m_suppressNav = false;
     int  m_lastFinished = 0, m_artGen = 0, m_playGen = 0, m_queueIndex = -1, m_repeat = 0;
     std::chrono::steady_clock::time_point m_lastSeek{};
+
+    // OS integration state
+    Settings m_settings{};
+    HWND m_appHwnd{ nullptr }, m_msgHwnd{ nullptr };
+    NOTIFYICONDATAW m_nid{};
+    bool m_trayAdded = false, m_quitting = false;
+
+    wm::SystemMediaTransportControls m_smtc{ nullptr };
+    winrt::event_token m_smtcButtonToken{}, m_smtcPosToken{};
+    wm::MediaPlaybackStatus m_lastSmtcStatus{ wm::MediaPlaybackStatus::Closed };
+    int m_smtcTimelineTick = 0;
+
+    static constexpr UINT kTrayCallback = WM_APP + 1;
+    static constexpr UINT kTrayUID      = 1;
+    static constexpr UINT kMenuRestore  = 1001;
+    static constexpr UINT kMenuQuit     = 1002;
 };
 
 // =============================================================================

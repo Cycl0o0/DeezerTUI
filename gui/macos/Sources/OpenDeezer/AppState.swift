@@ -15,6 +15,15 @@ final class AppState: ObservableObject {
     @Published var busy = false
     @Published var userID = ""
     @Published var showCredits = false
+    @Published var showSettings = false
+
+    // Persisted preferences (audio quality, close-to-tray).
+    @Published var settings = AppSettings.load()
+    private var started = false // guards start() against repeated onAppear
+
+    // OS Now Playing surface + menu-bar tray / background-playback controller.
+    let nowPlaying = NowPlayingController()
+    let tray = TrayController()
 
     @Published var section: Section = .liked
     @Published var tracks: [Track] = []          // current track list / queue
@@ -31,6 +40,7 @@ final class AppState: ObservableObject {
     // playback
     @Published var current: Track?
     @Published var state: PlayerState = .stopped
+    @Published var outputFormat = "" // human label of the current stream format
     @Published var positionMs: Int64 = 0
     @Published var durationMs: Int64 = 0
     @Published var volume: Double = 1
@@ -39,15 +49,18 @@ final class AppState: ObservableObject {
 
     private var queueIndex = 0
     private var lastFinished = 0
+    private var lastState: PlayerState = .stopped
     private var timer: Timer?
 
     // MARK: login
 
     func start() {
+        guard !started else { return } // onAppear can fire more than once
         guard let arl = Self.loadARL(), !arl.isEmpty else {
             loginError = "No ARL found. Set $DEEZER_ARL or ~/.config/opendeezer/arl.txt"
             return
         }
+        started = true
         busy = true
         Task.detached {
             let ok = Core.initialize(arl: arl)
@@ -57,6 +70,12 @@ final class AppState: ObservableObject {
                 if ok {
                     self.userID = Core.userID
                     self.volume = Core.volume
+                    // Apply persisted audio quality, claim the OS Now Playing
+                    // slot's command handlers, and wire up the tray.
+                    Core.setQuality(self.settings.quality)
+                    self.nowPlaying.registerCommands(app: self)
+                    self.tray.closeToTray = self.settings.closeToTray
+                    self.tray.attach(app: self)
                     self.startTimer()
                     self.loadFavorites()
                 } else {
@@ -160,6 +179,9 @@ final class AppState: ObservableObject {
         current = t
         durationMs = t.durationMs
         positionMs = 0
+        lastState = .loading
+        // Push the new track to the OS Now Playing surface immediately.
+        nowPlaying.update(track: t, state: .loading, positionMs: 0, durationMs: t.durationMs)
         Task.detached { Core.play(t.id, durationMs: t.durationMs) }
     }
 
@@ -191,9 +213,30 @@ final class AppState: ObservableObject {
     }
 
     func seek(toFraction f: Double) {
-        let ms = Int64(max(0, min(1, f)) * Double(durationMs))
-        positionMs = ms              // optimistic; the timer reconciles
-        Core.seek(ms)
+        seek(toMs: Int64(max(0, min(1, f)) * Double(durationMs)))
+    }
+
+    // seek(toMs:) is the absolute-position seek used by the scrubber and by the
+    // OS "change playback position" remote command.
+    func seek(toMs ms: Int64) {
+        let clamped = max(0, min(ms, durationMs))
+        positionMs = clamped          // optimistic; the timer reconciles
+        Core.seek(clamped)
+        nowPlaying.updatePlayback(state: state, positionMs: clamped, durationMs: durationMs)
+    }
+
+    // MARK: settings
+
+    func setQuality(_ level: Int) {
+        settings.quality = level
+        Core.setQuality(level)
+        settings.save()
+    }
+
+    func setCloseToTray(_ on: Bool) {
+        settings.closeToTray = on
+        tray.closeToTray = on
+        settings.save()
     }
 
     // MARK: polling
@@ -206,9 +249,17 @@ final class AppState: ObservableObject {
     }
 
     private func tick() {
-        state = Core.state
+        let s = Core.state
         positionMs = Core.positionMs
         durationMs = Core.durationMs
+        // Only re-publish to the OS when the playback state actually changes —
+        // the system extrapolates elapsed time from the rate between pushes.
+        if s != lastState {
+            lastState = s
+            nowPlaying.updatePlayback(state: s, positionMs: positionMs, durationMs: durationMs)
+        }
+        state = s
+        outputFormat = Core.format
         let f = Core.finishedCount
         if f != lastFinished {
             lastFinished = f

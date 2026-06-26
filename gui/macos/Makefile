@@ -25,6 +25,7 @@ app: build
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp Info.plist $(APP)/Contents/Info.plist
 	cp $(BUILDIR)/$(BIN) $(APP)/Contents/MacOS/$(BIN)
+	cp $(ROOT)/assets/OpenDeezer.icns $(APP)/Contents/Resources/OpenDeezer.icns
 	@echo "built $(APP)"
 
 run: app

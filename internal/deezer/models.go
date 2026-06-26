@@ -50,3 +50,23 @@ type SearchResults struct {
 	Albums    []Album
 	Playlists []Playlist
 }
+
+// FormatLabel turns a raw Deezer media format into a human label for the UI.
+func FormatLabel(raw string) string {
+	switch strings.ToUpper(raw) {
+	case "":
+		return ""
+	case "FLAC":
+		return "FLAC · lossless"
+	case "MP3_320":
+		return "MP3 · 320 kbps"
+	case "MP3_256":
+		return "MP3 · 256 kbps"
+	case "MP3_128":
+		return "MP3 · 128 kbps"
+	case "MP3_64":
+		return "MP3 · 64 kbps"
+	default:
+		return raw
+	}
+}

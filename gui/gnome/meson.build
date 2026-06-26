@@ -14,9 +14,12 @@ project('opendeezer-gnome', 'c',
 deps = [
   # gtk_picture_set_content_fit is 4.8+; CSS string loader guarded for 4.12.
   dependency('gtk4', version: '>=4.10'),
-  # AdwNavigationSplitView/AdwToolbarView are 1.4; AdwAboutDialog is 1.5.
+  # AdwNavigationSplitView/AdwToolbarView are 1.4; AdwAboutDialog/AdwSwitchRow
+  # are 1.5; AdwPreferencesDialog is 1.5 (older falls back to the window).
   dependency('libadwaita-1', version: '>=1.5'),
   dependency('json-glib-1.0'),
+  # GDBus (MPRIS) ships in gio; pulled in transitively by gtk4 but make explicit.
+  dependency('gio-2.0'),
 ]
 
 # Prebuilt Go engine archive + its generated header.
@@ -33,3 +36,8 @@ executable('opendeezer-gnome',
 
 install_data('data/org.opendeezer.OpenDeezer.desktop',
   install_dir: get_option('datadir') / 'applications')
+
+# App icon (matches the .desktop Icon= name so the shell + window pick it up).
+install_data('data/opendeezer.png',
+  install_dir: get_option('datadir') / 'icons/hicolor/512x512/apps',
+  rename: 'org.opendeezer.OpenDeezer.png')

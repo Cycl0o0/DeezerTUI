@@ -98,6 +98,20 @@ typedef struct {
   int                   current_index; /* index into track_store, -1 if none */
   int                   last_finished; /* DZFinishedCount snapshot */
   guint                 cover_gen;     /* drops stale async cover fetches */
+
+  /* persisted settings (~/.config/opendeezer/settings.ini) */
+  int                   quality;       /* 0 Normal(128), 1 High(320), 2 HiFi(FLAC) */
+  gboolean              background;    /* keep playing on window close */
+
+  /* MPRIS — OS media controls over the session bus (GDBus) */
+  GDBusConnection      *bus;           /* set in on_bus_acquired */
+  GDBusNodeInfo        *mpris_node;    /* parsed introspection */
+  guint                 bus_name_id;   /* g_bus_own_name id */
+  guint                 mpris_root_id; /* registered MediaPlayer2 object */
+  guint                 mpris_player_id; /* registered .Player object */
+  char                 *mpris_status;  /* last published PlaybackStatus */
+
+  gboolean              held;          /* g_application_hold is active */
 } App;
 
 static App *APP; /* single window — a global keeps GTask plumbing tidy */
@@ -115,6 +129,20 @@ static void start_cover_fetch(App *a, const char *url);
 static void load_async(App *a, LoadKind kind, const char *arg);
 static void load_playlists_async(App *a);
 static void toast(App *a, const char *msg);
+
+/* settings */
+static void settings_load(App *a);
+static void settings_save(App *a);
+
+/* MPRIS notifications (defined after the playback section) */
+static void mpris_notify_track(App *a);
+static void mpris_notify_status(App *a, const char *status);
+static void mpris_notify_volume(App *a);
+static void mpris_emit_seeked(App *a, gint64 pos_ms);
+static void mpris_setup(App *a);
+
+/* background window helpers */
+static void show_window(App *a);
 
 /* ---------------------------------------------------------------------------
  * small helpers
@@ -418,6 +446,11 @@ static void play_index(App *a, int idx) {
   gtk_single_selection_set_selected(a->track_sel, idx);
   start_cover_fetch(a, t->artwork);
 
+  /* push the new track to the OS media controls immediately (metadata is
+   * already known; the Playing/Paused status follows from the poll). */
+  mpris_notify_track(a);
+  mpris_emit_seeked(a, 0);
+
   /* blocking play happens off the main loop */
   PlayCtx *ctx = g_new0(PlayCtx, 1);
   ctx->id = g_strdup(t->id);
@@ -445,6 +478,424 @@ static void on_play_clicked(GtkButton *b, gpointer data) {
 }
 static void on_prev_clicked(GtkButton *b, gpointer data) { (void)b; play_relative(data, -1); }
 static void on_next_clicked(GtkButton *b, gpointer data) { (void)b; play_relative(data, 1); }
+
+/* ---------------------------------------------------------------------------
+ * settings: a tiny GKeyFile alongside arl.txt (~/.config/opendeezer/settings.ini)
+ * ------------------------------------------------------------------------- */
+
+static char *settings_path(void) {
+  return g_build_filename(g_get_user_config_dir(), "opendeezer", "settings.ini", NULL);
+}
+
+static void settings_load(App *a) {
+  /* sensible defaults: High quality, keep playing in background */
+  a->quality = 1;
+  a->background = TRUE;
+
+  GKeyFile *kf = g_key_file_new();
+  char *path = settings_path();
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    if (g_key_file_has_key(kf, "audio", "quality_level", NULL)) {
+      a->quality = g_key_file_get_integer(kf, "audio", "quality_level", NULL);
+      if (a->quality < 0) a->quality = 0;
+      if (a->quality > 2) a->quality = 2;
+    }
+    if (g_key_file_has_key(kf, "general", "background", NULL))
+      a->background = g_key_file_get_boolean(kf, "general", "background", NULL);
+  }
+  g_free(path);
+  g_key_file_free(kf);
+}
+
+static void settings_save(App *a) {
+  GKeyFile *kf = g_key_file_new();
+  g_key_file_set_integer(kf, "audio", "quality_level", a->quality);
+  g_key_file_set_boolean(kf, "general", "background", a->background);
+
+  char *path = settings_path();
+  char *dir = g_path_get_dirname(path);
+  g_mkdir_with_parents(dir, 0700);
+  g_key_file_save_to_file(kf, path, NULL); /* best effort */
+  g_free(dir);
+  g_free(path);
+  g_key_file_free(kf);
+}
+
+static void on_quality_selected(GObject *row, GParamSpec *ps, gpointer data) {
+  (void)ps;
+  App *a = data;
+  a->quality = (int)adw_combo_row_get_selected(ADW_COMBO_ROW(row));
+  DZSetQuality(a->quality);
+  settings_save(a);
+  const char *names[] = {"Normal (MP3 128)", "High (MP3 320)", "HiFi (FLAC)"};
+  toastf(a, "Audio quality: %s", names[a->quality < 0 ? 0 : (a->quality > 2 ? 2 : a->quality)]);
+}
+
+static void on_background_toggled(GObject *row, GParamSpec *ps, gpointer data) {
+  (void)ps;
+  App *a = data;
+  a->background = adw_switch_row_get_active(ADW_SWITCH_ROW(row));
+  settings_save(a);
+}
+
+static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
+  (void)action; (void)param; (void)data;
+  App *a = APP;
+
+  AdwPreferencesPage *page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+  adw_preferences_page_set_title(page, "Settings");
+  adw_preferences_page_set_icon_name(page, "preferences-system-symbolic");
+
+  /* ---- Audio ---- */
+  AdwPreferencesGroup *audio = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+  adw_preferences_group_set_title(audio, "Audio");
+
+  const char *const qlabels[] = {"Normal — MP3 128 kbps",
+                                 "High — MP3 320 kbps",
+                                 "HiFi — FLAC lossless", NULL};
+  GtkWidget *quality = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(quality), "Streaming quality");
+  adw_combo_row_set_model(ADW_COMBO_ROW(quality),
+                          G_LIST_MODEL(gtk_string_list_new(qlabels)));
+  adw_combo_row_set_selected(ADW_COMBO_ROW(quality), (guint)a->quality);
+  g_signal_connect(quality, "notify::selected", G_CALLBACK(on_quality_selected), a);
+  adw_preferences_group_add(audio, quality);
+  adw_preferences_page_add(page, audio);
+
+  /* ---- Behaviour ---- */
+  AdwPreferencesGroup *behave = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+  adw_preferences_group_set_title(behave, "Behaviour");
+
+  GtkWidget *bg = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(bg), "Keep playing in background");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(bg),
+                              "When the window is closed, keep playing and stay in the "
+                              "system media controls instead of quitting");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(bg), a->background);
+  g_signal_connect(bg, "notify::active", G_CALLBACK(on_background_toggled), a);
+  adw_preferences_group_add(behave, bg);
+  adw_preferences_page_add(page, behave);
+
+#if ADW_CHECK_VERSION(1, 5, 0)
+  AdwPreferencesDialog *dlg = ADW_PREFERENCES_DIALOG(adw_preferences_dialog_new());
+  adw_preferences_dialog_add(dlg, page);
+  adw_dialog_present(ADW_DIALOG(dlg), GTK_WIDGET(a->win));
+#else
+  GtkWidget *win = adw_preferences_window_new();
+  adw_preferences_window_add(ADW_PREFERENCES_WINDOW(win), page);
+  gtk_window_set_transient_for(GTK_WINDOW(win), GTK_WINDOW(a->win));
+  gtk_window_set_modal(GTK_WINDOW(win), TRUE);
+  gtk_window_present(GTK_WINDOW(win));
+#endif
+}
+
+/* ---------------------------------------------------------------------------
+ * MPRIS: org.mpris.MediaPlayer2(.Player) on the session bus via GDBus, so the
+ * GNOME media overlay / lock screen / media keys can see and drive playback.
+ * Both interfaces live on /org/mpris/MediaPlayer2; methods reuse the existing
+ * transport handlers, and PropertiesChanged/Seeked are emitted from the poll
+ * and on every track change. No new deps — GDBus ships in gio.
+ * ------------------------------------------------------------------------- */
+
+#define MPRIS_BUS_NAME   "org.mpris.MediaPlayer2.opendeezer"
+#define MPRIS_OBJ_PATH   "/org/mpris/MediaPlayer2"
+#define MPRIS_PLAYER_IFC "org.mpris.MediaPlayer2.Player"
+
+static const char MPRIS_XML[] =
+    "<node>"
+    "  <interface name='org.mpris.MediaPlayer2'>"
+    "    <method name='Raise'/>"
+    "    <method name='Quit'/>"
+    "    <property name='CanQuit' type='b' access='read'/>"
+    "    <property name='CanRaise' type='b' access='read'/>"
+    "    <property name='HasTrackList' type='b' access='read'/>"
+    "    <property name='Identity' type='s' access='read'/>"
+    "    <property name='DesktopEntry' type='s' access='read'/>"
+    "    <property name='SupportedUriSchemes' type='as' access='read'/>"
+    "    <property name='SupportedMimeTypes' type='as' access='read'/>"
+    "  </interface>"
+    "  <interface name='org.mpris.MediaPlayer2.Player'>"
+    "    <method name='Next'/>"
+    "    <method name='Previous'/>"
+    "    <method name='Pause'/>"
+    "    <method name='PlayPause'/>"
+    "    <method name='Stop'/>"
+    "    <method name='Play'/>"
+    "    <method name='Seek'><arg name='Offset' type='x' direction='in'/></method>"
+    "    <method name='SetPosition'>"
+    "      <arg name='TrackId' type='o' direction='in'/>"
+    "      <arg name='Position' type='x' direction='in'/>"
+    "    </method>"
+    "    <method name='OpenUri'><arg name='Uri' type='s' direction='in'/></method>"
+    "    <signal name='Seeked'><arg name='Position' type='x'/></signal>"
+    "    <property name='PlaybackStatus' type='s' access='read'/>"
+    "    <property name='Rate' type='d' access='readwrite'/>"
+    "    <property name='Metadata' type='a{sv}' access='read'/>"
+    "    <property name='Volume' type='d' access='readwrite'/>"
+    "    <property name='Position' type='x' access='read'/>"
+    "    <property name='MinimumRate' type='d' access='read'/>"
+    "    <property name='MaximumRate' type='d' access='read'/>"
+    "    <property name='CanGoNext' type='b' access='read'/>"
+    "    <property name='CanGoPrevious' type='b' access='read'/>"
+    "    <property name='CanPlay' type='b' access='read'/>"
+    "    <property name='CanPause' type='b' access='read'/>"
+    "    <property name='CanSeek' type='b' access='read'/>"
+    "    <property name='CanControl' type='b' access='read'/>"
+    "  </interface>"
+    "</node>";
+
+static const char *mpris_status_str(int state) {
+  if (state == 2) return "Playing";
+  if (state == 3) return "Paused";
+  return "Stopped";
+}
+
+/* the currently-selected DzTrack, or NULL — caller owns the returned ref */
+static DzTrack *mpris_current_track(App *a) {
+  if (a->current_index < 0) return NULL;
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(a->track_store));
+  if ((guint)a->current_index >= n) return NULL;
+  return g_list_model_get_item(G_LIST_MODEL(a->track_store), a->current_index);
+}
+
+/* build the a{sv} Metadata dict for the current track (floating ref) */
+static GVariant *mpris_metadata(App *a) {
+  GVariantBuilder b;
+  g_variant_builder_init(&b, G_VARIANT_TYPE("a{sv}"));
+  DzTrack *t = mpris_current_track(a);
+  if (t) {
+    /* object paths only allow [A-Za-z0-9_]; Deezer ids are digits but sanitise
+     * anyway so a stray char can never produce an invalid path. */
+    char *path = g_strdup_printf("/org/mpris/MediaPlayer2/opendeezer/track/%s",
+                                 (t->id && *t->id) ? t->id : "0");
+    for (char *p = path + 1; *p; p++)
+      if (!(g_ascii_isalnum(*p) || *p == '_' || *p == '/')) *p = '_';
+    g_variant_builder_add(&b, "{sv}", "mpris:trackid", g_variant_new_object_path(path));
+    g_free(path);
+
+    g_variant_builder_add(&b, "{sv}", "mpris:length",
+                          g_variant_new_int64(t->duration_ms * 1000)); /* µs */
+    g_variant_builder_add(&b, "{sv}", "xesam:title", g_variant_new_string(t->name));
+    const char *artists[] = {t->artist, NULL};
+    g_variant_builder_add(&b, "{sv}", "xesam:artist", g_variant_new_strv(artists, -1));
+    g_variant_builder_add(&b, "{sv}", "xesam:album", g_variant_new_string(t->album));
+    if (t->artwork && *t->artwork)
+      g_variant_builder_add(&b, "{sv}", "mpris:artUrl", g_variant_new_string(t->artwork));
+    g_object_unref(t);
+  } else {
+    g_variant_builder_add(&b, "{sv}", "mpris:trackid",
+        g_variant_new_object_path("/org/mpris/MediaPlayer2/opendeezer/track/none"));
+  }
+  return g_variant_builder_end(&b);
+}
+
+static GVariant *mpris_get_prop(GDBusConnection *c, const char *sender, const char *path,
+                                const char *iface, const char *prop, GError **err,
+                                gpointer u) {
+  (void)c; (void)sender; (void)path; (void)err;
+  App *a = u;
+  if (g_strcmp0(iface, "org.mpris.MediaPlayer2") == 0) {
+    if (!g_strcmp0(prop, "Identity"))     return g_variant_new_string("OpenDeezer");
+    if (!g_strcmp0(prop, "DesktopEntry")) return g_variant_new_string("org.opendeezer.OpenDeezer");
+    if (!g_strcmp0(prop, "CanQuit"))      return g_variant_new_boolean(TRUE);
+    if (!g_strcmp0(prop, "CanRaise"))     return g_variant_new_boolean(TRUE);
+    if (!g_strcmp0(prop, "HasTrackList")) return g_variant_new_boolean(FALSE);
+    if (!g_strcmp0(prop, "SupportedUriSchemes") || !g_strcmp0(prop, "SupportedMimeTypes")) {
+      const char *empty[] = {NULL};
+      return g_variant_new_strv(empty, 0);
+    }
+  } else if (g_strcmp0(iface, MPRIS_PLAYER_IFC) == 0) {
+    if (!g_strcmp0(prop, "PlaybackStatus")) return g_variant_new_string(mpris_status_str(DZState()));
+    if (!g_strcmp0(prop, "Metadata"))       return mpris_metadata(a);
+    if (!g_strcmp0(prop, "Position"))       return g_variant_new_int64(DZPositionMS() * 1000);
+    if (!g_strcmp0(prop, "Rate"))           return g_variant_new_double(1.0);
+    if (!g_strcmp0(prop, "MinimumRate"))    return g_variant_new_double(1.0);
+    if (!g_strcmp0(prop, "MaximumRate"))    return g_variant_new_double(1.0);
+    if (!g_strcmp0(prop, "Volume"))         return g_variant_new_double(DZVolume());
+    if (!g_strcmp0(prop, "CanGoNext"))      return g_variant_new_boolean(TRUE);
+    if (!g_strcmp0(prop, "CanGoPrevious"))  return g_variant_new_boolean(TRUE);
+    if (!g_strcmp0(prop, "CanPlay"))        return g_variant_new_boolean(TRUE);
+    if (!g_strcmp0(prop, "CanPause"))       return g_variant_new_boolean(TRUE);
+    if (!g_strcmp0(prop, "CanSeek"))        return g_variant_new_boolean(TRUE);
+    if (!g_strcmp0(prop, "CanControl"))     return g_variant_new_boolean(TRUE);
+  }
+  return NULL;
+}
+
+static gboolean mpris_set_prop(GDBusConnection *c, const char *sender, const char *path,
+                               const char *iface, const char *prop, GVariant *value,
+                               GError **err, gpointer u) {
+  (void)c; (void)sender; (void)path; (void)iface; (void)err;
+  App *a = u;
+  if (!g_strcmp0(prop, "Volume")) {
+    double v = g_variant_get_double(value);
+    if (v < 0) v = 0; if (v > 1) v = 1;
+    DZSetVolume(v);
+    if (a->volume) gtk_range_set_value(GTK_RANGE(a->volume), v); /* keeps UI in sync */
+    mpris_notify_volume(a);
+    return TRUE;
+  }
+  if (!g_strcmp0(prop, "Rate")) return TRUE; /* fixed at 1.0, accept silently */
+  return FALSE;
+}
+
+static void mpris_root_method(GDBusConnection *c, const char *sender, const char *path,
+                              const char *iface, const char *method, GVariant *params,
+                              GDBusMethodInvocation *inv, gpointer u) {
+  (void)c; (void)sender; (void)path; (void)iface; (void)params;
+  App *a = u;
+  if (!g_strcmp0(method, "Raise"))
+    show_window(a);
+  else if (!g_strcmp0(method, "Quit"))
+    g_application_quit(G_APPLICATION(a->app));
+  g_dbus_method_invocation_return_value(inv, NULL);
+}
+
+static void mpris_player_method(GDBusConnection *c, const char *sender, const char *path,
+                                const char *iface, const char *method, GVariant *params,
+                                GDBusMethodInvocation *inv, gpointer u) {
+  (void)c; (void)sender; (void)path; (void)iface;
+  App *a = u;
+  if (!g_strcmp0(method, "PlayPause")) {
+    if (a->current_index < 0) play_relative(a, 1); else DZTogglePause();
+  } else if (!g_strcmp0(method, "Play")) {
+    int st = DZState();
+    if (st == 3) DZResume();
+    else if (st != 2) { if (a->current_index < 0) play_relative(a, 1); else DZResume(); }
+  } else if (!g_strcmp0(method, "Pause")) {
+    DZPause();
+  } else if (!g_strcmp0(method, "Stop")) {
+    DZStop();
+  } else if (!g_strcmp0(method, "Next")) {
+    play_relative(a, 1);
+  } else if (!g_strcmp0(method, "Previous")) {
+    play_relative(a, -1);
+  } else if (!g_strcmp0(method, "Seek")) {
+    gint64 off = 0;
+    g_variant_get(params, "(x)", &off);           /* µs, may be negative */
+    gint64 np = DZPositionMS() + off / 1000;       /* engine works in ms */
+    if (np < 0) np = 0;
+    DZSeek((long long)np);
+    mpris_emit_seeked(a, np);
+  } else if (!g_strcmp0(method, "SetPosition")) {
+    const char *tid = NULL; gint64 pos = 0;
+    g_variant_get(params, "(&ox)", &tid, &pos);
+    gint64 np = pos / 1000;
+    if (np < 0) np = 0;
+    DZSeek((long long)np);
+    mpris_emit_seeked(a, np);
+  }
+  /* OpenUri is unsupported — fall through to an empty reply */
+  g_dbus_method_invocation_return_value(inv, NULL);
+}
+
+/* register_object copies the vtable, but keep these static to be safe */
+static const GDBusInterfaceVTable mpris_root_vtable = {
+    mpris_root_method, mpris_get_prop, mpris_set_prop, {0}};
+static const GDBusInterfaceVTable mpris_player_vtable = {
+    mpris_player_method, mpris_get_prop, mpris_set_prop, {0}};
+
+/* emit PropertiesChanged on .Player for the {Metadata, PlaybackStatus} pair */
+static void mpris_notify_track(App *a) {
+  if (!a->bus) return;
+  GVariantBuilder b;
+  g_variant_builder_init(&b, G_VARIANT_TYPE("a{sv}"));
+  g_variant_builder_add(&b, "{sv}", "Metadata", mpris_metadata(a));
+  g_variant_builder_add(&b, "{sv}", "PlaybackStatus",
+                        g_variant_new_string(mpris_status_str(DZState())));
+  g_variant_builder_add(&b, "{sv}", "CanGoNext", g_variant_new_boolean(TRUE));
+  g_variant_builder_add(&b, "{sv}", "CanGoPrevious", g_variant_new_boolean(TRUE));
+  g_dbus_connection_emit_signal(
+      a->bus, NULL, MPRIS_OBJ_PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+      g_variant_new("(sa{sv}as)", MPRIS_PLAYER_IFC, &b, NULL), NULL);
+}
+
+static void mpris_notify_status(App *a, const char *status) {
+  if (!a->bus) return;
+  GVariantBuilder b;
+  g_variant_builder_init(&b, G_VARIANT_TYPE("a{sv}"));
+  g_variant_builder_add(&b, "{sv}", "PlaybackStatus", g_variant_new_string(status));
+  g_dbus_connection_emit_signal(
+      a->bus, NULL, MPRIS_OBJ_PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+      g_variant_new("(sa{sv}as)", MPRIS_PLAYER_IFC, &b, NULL), NULL);
+}
+
+static void mpris_notify_volume(App *a) {
+  if (!a->bus) return;
+  GVariantBuilder b;
+  g_variant_builder_init(&b, G_VARIANT_TYPE("a{sv}"));
+  g_variant_builder_add(&b, "{sv}", "Volume", g_variant_new_double(DZVolume()));
+  g_dbus_connection_emit_signal(
+      a->bus, NULL, MPRIS_OBJ_PATH, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+      g_variant_new("(sa{sv}as)", MPRIS_PLAYER_IFC, &b, NULL), NULL);
+}
+
+static void mpris_emit_seeked(App *a, gint64 pos_ms) {
+  if (!a->bus) return;
+  g_dbus_connection_emit_signal(a->bus, NULL, MPRIS_OBJ_PATH, MPRIS_PLAYER_IFC, "Seeked",
+                                g_variant_new("(x)", pos_ms * 1000), NULL);
+}
+
+static void on_bus_acquired(GDBusConnection *c, const char *name, gpointer u) {
+  (void)name;
+  App *a = u;
+  a->bus = c;
+  if (!a->mpris_node) return;
+  a->mpris_root_id = g_dbus_connection_register_object(
+      c, MPRIS_OBJ_PATH, a->mpris_node->interfaces[0], &mpris_root_vtable, a, NULL, NULL);
+  a->mpris_player_id = g_dbus_connection_register_object(
+      c, MPRIS_OBJ_PATH, a->mpris_node->interfaces[1], &mpris_player_vtable, a, NULL, NULL);
+}
+
+static void mpris_setup(App *a) {
+  GError *e = NULL;
+  a->mpris_node = g_dbus_node_info_new_for_xml(MPRIS_XML, &e);
+  if (!a->mpris_node) {
+    g_warning("MPRIS introspection failed: %s", e ? e->message : "?");
+    g_clear_error(&e);
+    return;
+  }
+  a->bus_name_id = g_bus_own_name(
+      G_BUS_TYPE_SESSION, MPRIS_BUS_NAME, G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
+      on_bus_acquired, NULL, NULL, a, NULL);
+}
+
+/* ---------------------------------------------------------------------------
+ * background: GNOME discourages tray icons, so when "keep playing in
+ * background" is on we hide the window and hold the GApplication alive; the
+ * MPRIS controls (and relaunching / Raise) bring it back.
+ * ------------------------------------------------------------------------- */
+
+static void show_window(App *a) {
+  if (!a->win) return;
+  gtk_widget_set_visible(GTK_WIDGET(a->win), TRUE);
+  gtk_window_present(GTK_WINDOW(a->win));
+  if (a->held) {
+    g_application_release(G_APPLICATION(a->app));
+    a->held = FALSE;
+  }
+}
+
+static gboolean on_window_close(GtkWindow *win, gpointer data) {
+  App *a = data;
+  if (!a->background)
+    return FALSE; /* honour the setting: let the window (and app) close */
+
+  /* keep the engine + main loop alive, hide the window */
+  if (!a->held) {
+    g_application_hold(G_APPLICATION(a->app));
+    a->held = TRUE;
+  }
+  gtk_widget_set_visible(GTK_WIDGET(win), FALSE);
+
+  GNotification *n = g_notification_new("OpenDeezer");
+  g_notification_set_body(
+      n, "Still playing in the background. Use the media controls or relaunch to reopen.");
+  g_application_send_notification(G_APPLICATION(a->app), "opendeezer-background", n);
+  g_object_unref(n);
+
+  return TRUE; /* stop the default destroy */
+}
 
 /* ---------------------------------------------------------------------------
  * async cover art: DZFetch on a worker, decode to a GdkTexture, set on main
@@ -513,7 +964,9 @@ static void on_seek_released(GtkGestureClick *g, int n, double x, double y, gpoi
   (void)g; (void)n; (void)x; (void)y;
   App *a = data;
   a->seeking = FALSE;
-  DZSeek((long long)gtk_range_get_value(GTK_RANGE(a->seek)));
+  gint64 pos = (gint64)gtk_range_get_value(GTK_RANGE(a->seek));
+  DZSeek((long long)pos);
+  mpris_emit_seeked(a, pos); /* discontinuous jump: tell MPRIS clients */
 }
 static gboolean on_seek_change(GtkRange *r, GtkScrollType s, double value, gpointer data) {
   (void)r; (void)s; (void)data;
@@ -521,8 +974,9 @@ static gboolean on_seek_change(GtkRange *r, GtkScrollType s, double value, gpoin
   return FALSE;
 }
 static void on_volume_changed(GtkRange *r, gpointer data) {
-  (void)data;
+  App *a = data;
   DZSetVolume(gtk_range_get_value(r));
+  mpris_notify_volume(a);
 }
 
 /* ---------------------------------------------------------------------------
@@ -559,6 +1013,31 @@ static gboolean tick(gpointer data) {
   gtk_label_set_label(a->dur_label, dt);
   g_free(pt); g_free(dt);
 
+  /* show the actual output format (e.g. "FLAC · lossless") next to the artist */
+  if (a->current_index >= 0) {
+    DzTrack *ct = g_list_model_get_item(G_LIST_MODEL(a->track_store), a->current_index);
+    if (ct) {
+      char *fmt = DZFormat(); /* labeled, malloc'd */
+      if (fmt && *fmt) {
+        char *sub = g_strconcat(ct->artist, "   ·   ", fmt, NULL);
+        gtk_label_set_label(a->np_subtitle, sub);
+        g_free(sub);
+      } else {
+        gtk_label_set_label(a->np_subtitle, ct->artist);
+      }
+      if (fmt) DZFree(fmt);
+      g_object_unref(ct);
+    }
+  }
+
+  /* mirror the playback status onto the OS media controls whenever it flips */
+  const char *st = state == 2 ? "Playing" : (state == 3 ? "Paused" : "Stopped");
+  if (g_strcmp0(st, a->mpris_status) != 0) {
+    g_free(a->mpris_status);
+    a->mpris_status = g_strdup(st);
+    mpris_notify_status(a, st);
+  }
+
   int fin = DZFinishedCount(); /* monotonic, +1 when a track ends naturally */
   if (fin != a->last_finished) {
     a->last_finished = fin;
@@ -580,6 +1059,7 @@ static void init_done(GObject *src, GAsyncResult *res, gpointer data) {
   (void)src; (void)data;
   if (g_task_propagate_boolean(G_TASK(res), NULL)) {
     toast(APP, "Connected to Deezer");
+    DZSetQuality(APP->quality); /* apply persisted quality once logged in */
     load_playlists_async(APP);
     /* select Liked Songs (row 0) → triggers the favorites load */
     GtkListBoxRow *row = gtk_list_box_get_row_at_index(APP->sidebar, 0);
@@ -794,8 +1274,8 @@ static GtkWidget *build_track_view(App *a) {
 
 static void on_activate(GApplication *app, gpointer data) {
   (void)data;
-  if (APP) { /* already built (re-activation): just raise the window */
-    gtk_window_present(GTK_WINDOW(APP->win));
+  if (APP) { /* already built (re-activation): un-hide + raise the window */
+    show_window(APP);
     return;
   }
 
@@ -807,9 +1287,18 @@ static void on_activate(GApplication *app, gpointer data) {
   a->current_index = -1;
   APP = a;
 
+  /* load persisted settings and apply the audio quality before any playback */
+  settings_load(a);
+  DZSetQuality(a->high_quality ? 1 : 0);
+
+  /* publish ourselves on the session bus for the OS media controls */
+  mpris_setup(a);
+
   a->win = ADW_APPLICATION_WINDOW(adw_application_window_new(GTK_APPLICATION(app)));
   gtk_window_set_title(GTK_WINDOW(a->win), "OpenDeezer");
   gtk_window_set_default_size(GTK_WINDOW(a->win), 1100, 720);
+  /* honour close-to-tray / background playback */
+  g_signal_connect(a->win, "close-request", G_CALLBACK(on_window_close), a);
 
   /* window actions + menu */
   GSimpleAction *about_act = g_simple_action_new("about", NULL);
@@ -820,8 +1309,15 @@ static void on_activate(GApplication *app, gpointer data) {
   g_signal_connect(quit_act, "activate", G_CALLBACK(on_quit), app);
   g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(quit_act));
   g_object_unref(quit_act);
+  GSimpleAction *settings_act = g_simple_action_new("settings", NULL);
+  g_signal_connect(settings_act, "activate", G_CALLBACK(on_settings), NULL);
+  g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(settings_act));
+  g_object_unref(settings_act);
+  const char *settings_accels[] = {"<Ctrl>comma", NULL};
+  gtk_application_set_accels_for_action(GTK_APPLICATION(app), "app.settings", settings_accels);
 
   GMenu *menu = g_menu_new();
+  g_menu_append(menu, "Settings", "app.settings");
   g_menu_append(menu, "About OpenDeezer", "app.about");
   g_menu_append(menu, "Quit", "app.quit");
 

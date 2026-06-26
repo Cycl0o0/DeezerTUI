@@ -22,6 +22,10 @@ let package = Package(
                     "-framework", "AudioToolbox",
                     "-framework", "AudioUnit",
                     "-framework", "Foundation",
+                    // OS Now Playing / media keys (MPNowPlayingInfoCenter,
+                    // MPRemoteCommandCenter) + AppKit tray (NSStatusItem).
+                    "-framework", "MediaPlayer",
+                    "-framework", "AppKit",
                 ])
             ]
         ),

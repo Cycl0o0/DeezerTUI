@@ -75,6 +75,11 @@
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
 
+  <!-- App icon (taskbar / Explorer). -->
+  <ItemGroup>
+    <ResourceCompile Include="opendeezer.rc" />
+  </ItemGroup>
+
   <ItemGroup>
     <Manifest Include="app.manifest" />
   </ItemGroup>

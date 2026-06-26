@@ -62,8 +62,16 @@ type Player struct {
 	played   atomic.Int64 // decoded PCM bytes consumed by oto (position)
 	totalMS  atomic.Int64
 	lastErr  atomic.Value // string
+	format   atomic.Value // string: resolved Deezer format of the current stream
 	volume   atomic.Uint64 // float64 bits, 0..1
 	onFinish func()
+}
+
+// Format returns the resolved Deezer format of the current/last stream
+// (e.g. "MP3_128", "MP3_320", "FLAC"), or "" if nothing has played.
+func (p *Player) Format() string {
+	s, _ := p.format.Load().(string)
+	return s
 }
 
 // pcmStream is a decoder that yields interleaved s16 PCM and can seek by PCM
@@ -122,6 +130,7 @@ func NewPlayer() (*Player, error) {
 	p := &Player{ctx: ctx}
 	p.state.Store(int32(Stopped))
 	p.lastErr.Store("")
+	p.format.Store("")
 	p.setVolume(1.0)
 	return p, nil
 }
@@ -175,6 +184,7 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 	p.lastErr.Store("")
 	p.played.Store(0)
 	p.totalMS.Store(durationMS)
+	p.format.Store(plan.Format)
 
 	resp, err := http.Get(plan.CDNURL)
 	if err != nil {

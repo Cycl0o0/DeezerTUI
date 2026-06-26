@@ -32,6 +32,13 @@ enum Core {
         return String(cString: p)
     }
 
+    /// Human label for the current stream's actual format (e.g. "FLAC · lossless").
+    static var format: String {
+        guard let p = DZFormat() else { return "" }
+        defer { DZFree(p) }
+        return String(cString: p)
+    }
+
     // MARK: browse
 
     static func favorites() -> [Track] {
@@ -65,4 +72,10 @@ enum Core {
     static var positionMs: Int64 { DZPositionMS() }
     static var durationMs: Int64 { DZDurationMS() }
     static var finishedCount: Int { Int(DZFinishedCount()) }
+
+    // MARK: audio quality
+
+    /// Quality level: 0 = Normal (MP3 128), 1 = High (MP3 320), 2 = HiFi (FLAC).
+    static func setQuality(_ level: Int) { DZSetQuality(Int32(level)) }
+    static var quality: Int { Int(DZQuality()) }
 }

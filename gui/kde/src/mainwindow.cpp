@@ -1,10 +1,15 @@
 #include "mainwindow.h"
+#include "mpris.h"
+#include "settingsdialog.h"
 
 #include <QAction>
 #include <QAbstractItemView>
+#include <QApplication>
+#include <QCloseEvent>
 #include <QColor>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -21,6 +26,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
 #include <QRandomGenerator>
@@ -29,6 +35,7 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyle>
+#include <QSystemTrayIcon>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -40,6 +47,12 @@
 extern "C" {
 #include "libdeezercore.h"
 }
+
+// Audio-quality controls. Declared here as well so the GUI still compiles
+// against an older generated header; identical redeclarations are harmless.
+extern "C" void DZSetQuality(int level); // 0=MP3_128, 1=MP3_320, 2=FLAC
+extern "C" char *DZFormat(void);         // human label of the current stream
+extern "C" int  DZHighQuality(void);
 
 namespace {
 
@@ -130,6 +143,29 @@ QString loadARL() {
     return QString();
 }
 
+// A themed app icon, falling back to a Deezer-purple disc with a white note so
+// the tray entry and window are recognisable even without an installed theme.
+QIcon appIcon() {
+    QIcon themed = QIcon::fromTheme(QStringLiteral("org.opendeezer.OpenDeezer"));
+    if (!themed.isNull())
+        return themed;
+    QPixmap pm(64, 64);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setBrush(QColor(kAccent));
+    p.setPen(Qt::NoPen);
+    p.drawEllipse(2, 2, 60, 60);
+    QFont f = p.font();
+    f.setPointSize(30);
+    f.setBold(true);
+    p.setFont(f);
+    p.setPen(Qt::white);
+    p.drawText(pm.rect(), Qt::AlignCenter, QStringLiteral("♪")); // ♪
+    p.end();
+    return QIcon(pm);
+}
+
 QToolButton *mediaButton(QStyle *style, QStyle::StandardPixmap icon) {
     auto *b = new QToolButton;
     b->setIcon(style->standardIcon(icon));
@@ -144,7 +180,14 @@ QToolButton *mediaButton(QStyle *style, QStyle::StandardPixmap icon) {
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle("OpenDeezer");
+    setWindowIcon(appIcon());
     setMinimumSize(900, 600);
+
+    // Load persisted settings (config dir lives alongside arl.txt).
+    const QString cfg = settingsPath();
+    QDir().mkpath(QFileInfo(cfg).absolutePath());
+    m_quality = SettingsDialog::loadQuality(cfg);
+    m_closeToTray = SettingsDialog::loadCloseToTray(cfg);
 
     buildMenu();
     buildSidebar();
@@ -174,17 +217,145 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_poll->setInterval(300);
     connect(m_poll, &QTimer::timeout, this, &MainWindow::tick);
 
+    setupMpris();   // session-bus media controls / now-playing
+    setupTray();    // background playback + close-to-tray
+
     statusBar()->showMessage("Logging in…");
     startLogin();
+}
+
+// ---- OS integration: MPRIS, tray, settings --------------------------------
+
+QString MainWindow::settingsPath() const {
+    // Live next to arl.txt under the app config dir (~/.config/opendeezer).
+    return QDir::homePath() + "/.config/opendeezer/settings.ini";
+}
+
+// Register on the session bus and wire every MPRIS command to MainWindow's own
+// existing transport handlers — no playback logic is duplicated here.
+void MainWindow::setupMpris() {
+    m_mpris = new MprisController(this);
+    if (!m_mpris->registerOnBus()) {
+        // No usable session bus (e.g. headless) — degrade silently.
+        return;
+    }
+    connect(m_mpris, &MprisController::playPauseRequested, this, &MainWindow::togglePause);
+    connect(m_mpris, &MprisController::nextRequested,      this, &MainWindow::next);
+    connect(m_mpris, &MprisController::prevRequested,      this, &MainWindow::prev);
+    connect(m_mpris, &MprisController::playRequested,  this, [this] { DZResume(); });
+    connect(m_mpris, &MprisController::pauseRequested, this, [this] { DZPause(); });
+    connect(m_mpris, &MprisController::stopRequested,  this, [this] { DZStop(); });
+    connect(m_mpris, &MprisController::seekRequested, this, [this](qlonglong offUs) {
+        // MPRIS Seek is relative (µs); the engine seeks to an absolute ms.
+        const qint64 target = qMax<qint64>(0, DZPositionMS() + offUs / 1000);
+        DZSeek(target);
+        m_mpris->notifySeeked(target);
+    });
+    connect(m_mpris, &MprisController::setPositionRequested, this, [this](qlonglong posUs) {
+        const qint64 ms = qMax<qint64>(0, posUs / 1000);
+        DZSeek(ms);
+        m_mpris->notifySeeked(ms);
+    });
+    connect(m_mpris, &MprisController::volumeChangeRequested, this, [this](double v) {
+        m_vol->setValue(static_cast<int>(qRound(qBound(0.0, v, 1.0) * 100)));
+    });
+    connect(m_mpris, &MprisController::raiseRequested, this, [this] {
+        showNormal();
+        raise();
+        activateWindow();
+    });
+    connect(m_mpris, &MprisController::quitRequested, this, &MainWindow::quitApp);
+}
+
+// A tray icon keeps the app reachable while the window is hidden and playback
+// continues in the background. Only created when a system tray is available.
+void MainWindow::setupTray() {
+    if (!QSystemTrayIcon::isSystemTrayAvailable())
+        return;
+    m_tray = new QSystemTrayIcon(appIcon(), this);
+    m_tray->setToolTip(QStringLiteral("OpenDeezer"));
+
+    auto *menu = new QMenu(this);
+    auto *restore = menu->addAction(QStringLiteral("Show OpenDeezer"));
+    connect(restore, &QAction::triggered, this, [this] {
+        showNormal();
+        raise();
+        activateWindow();
+    });
+    menu->addSeparator();
+    auto *quit = menu->addAction(QStringLiteral("Quit"));
+    connect(quit, &QAction::triggered, this, &MainWindow::quitApp);
+    m_tray->setContextMenu(menu);
+
+    connect(m_tray, &QSystemTrayIcon::activated, this,
+            [this](QSystemTrayIcon::ActivationReason reason) {
+                if (reason == QSystemTrayIcon::Trigger ||
+                    reason == QSystemTrayIcon::DoubleClick) {
+                    if (isVisible()) {
+                        hide();
+                    } else {
+                        showNormal();
+                        raise();
+                        activateWindow();
+                    }
+                }
+            });
+    m_tray->show();
+}
+
+void MainWindow::openSettings() {
+    SettingsDialog dlg(settingsPath(), this);
+    connect(&dlg, &SettingsDialog::qualityChanged, this, &MainWindow::applyQuality);
+    connect(&dlg, &SettingsDialog::closeToTrayChanged, this,
+            [this](bool on) { m_closeToTray = on; });
+    dlg.exec();
+}
+
+void MainWindow::applyQuality(int level) {
+    m_quality = level;
+    DZSetQuality(level);
+    const char *names[] = {"Normal (MP3 128)", "High (MP3 320)", "HiFi (FLAC)"};
+    statusBar()->showMessage(QStringLiteral("Quality: ") +
+                             names[level < 0 ? 0 : (level > 2 ? 2 : level)], 3000);
+}
+
+void MainWindow::quitApp() {
+    m_forceQuit = true;
+    if (m_tray)
+        m_tray->hide();
+    close();
+}
+
+// Honour the close-to-tray setting: hide to the tray and keep the engine
+// playing, unless the user explicitly chose Quit.
+void MainWindow::closeEvent(QCloseEvent *event) {
+    if (!m_forceQuit && m_closeToTray && m_tray) {
+        hide();
+        event->ignore();
+        if (!m_trayHintShown) {
+            m_tray->showMessage(QStringLiteral("OpenDeezer"),
+                                QStringLiteral("Still playing in the background."),
+                                appIcon(), 4000);
+            m_trayHintShown = true;
+        }
+        return;
+    }
+    DZStop();
+    QMainWindow::closeEvent(event);
+    qApp->quit();
 }
 
 // ---- menu -----------------------------------------------------------------
 
 void MainWindow::buildMenu() {
     auto *file = menuBar()->addMenu("&File");
+    auto *settings = file->addAction("&Settings…");
+    settings->setShortcut(QKeySequence::Preferences);
+    connect(settings, &QAction::triggered, this, &MainWindow::openSettings);
+    file->addSeparator();
     auto *quit = file->addAction("&Quit");
     quit->setShortcut(QKeySequence::Quit);
-    connect(quit, &QAction::triggered, this, &QWidget::close);
+    connect(quit, &QAction::triggered, this, &MainWindow::quitApp);
 
     auto *help = menuBar()->addMenu("&Help");
     auto *about = help->addAction("&About OpenDeezer");
@@ -376,6 +547,8 @@ QWidget *MainWindow::buildTransport() {
     connect(m_seek, &QSlider::sliderReleased, this, [this] {
         m_seeking = false;
         DZSeek(m_seek->value());
+        if (m_mpris)
+            m_mpris->notifySeeked(m_seek->value()); // discontinuous jump
     });
     connect(m_seek, &QSlider::valueChanged, this, [this](int v) {
         if (m_seeking)
@@ -442,6 +615,7 @@ void MainWindow::startLogin() {
                 m_loggedIn = true;
                 m_lastFinished = DZFinishedCount();
                 m_vol->setValue(static_cast<int>(qRound(DZVolume() * 100)));
+                applyQuality(m_quality);   // apply persisted quality on startup
                 m_poll->start();
                 m_sidebar->setCurrentRow(0); // triggers loadFavorites()
                 statusBar()->showMessage("Connected", 3000);
@@ -673,6 +847,14 @@ void MainWindow::playCurrent() {
 void MainWindow::setNowPlaying(const Track &t) {
     m_nowPlaying->setText(t.name + "\n" + t.artistLine);
     m_cover->setPixmap(placeholderPix(56));
+
+    // Push the new track to the OS media overlay / lock-screen.
+    if (m_mpris) {
+        m_mpris->updateMetadata(t.name, t.artistLine, t.albumName, t.artworkUrl,
+                                t.durationMs, t.id);
+        m_mpris->updateStatus(QStringLiteral("Playing"));
+        m_lastStatus = QStringLiteral("Playing");
+    }
     const int token = ++m_playGen; // a newer track invalidates this cover
     if (!t.artworkUrl.isEmpty())
         fetchImage(t.artworkUrl, -1, [this, token](const QImage &img) {
@@ -711,7 +893,11 @@ void MainWindow::prev() {
     playCurrent();
 }
 
-void MainWindow::setVolume(int percent) { DZSetVolume(percent / 100.0); }
+void MainWindow::setVolume(int percent) {
+    DZSetVolume(percent / 100.0);
+    if (m_mpris)
+        m_mpris->updateVolume(percent / 100.0);
+}
 
 // ---- poll loop ------------------------------------------------------------
 
@@ -732,6 +918,30 @@ void MainWindow::tick() {
 
     m_playBtn->setIcon(style()->standardIcon(
         st == 2 ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay));
+
+    // Mirror playback status + position to the OS media controls. DZState enum:
+    // 0 Stopped, 1 Loading, 2 Playing, 3 Paused, 4 Errored.
+    if (m_mpris) {
+        const QString status = st == 2 ? QStringLiteral("Playing")
+                               : st == 3 ? QStringLiteral("Paused")
+                                         : QStringLiteral("Stopped");
+        if (status != m_lastStatus) {
+            m_mpris->updateStatus(status);
+            m_lastStatus = status;
+        }
+        m_mpris->updatePosition(pos);
+    }
+
+    // Show the actual output format next to the now-playing title.
+    if (m_hasCurrent) {
+        QString sub = m_current.artistLine;
+        if (char *fp = DZFormat()) {
+            if (*fp)
+                sub += QStringLiteral("   ·   ") + QString::fromUtf8(fp);
+            DZFree(fp);
+        }
+        m_nowPlaying->setText(m_current.name + "\n" + sub);
+    }
 
     const int f = DZFinishedCount();
     if (f != m_lastFinished) {

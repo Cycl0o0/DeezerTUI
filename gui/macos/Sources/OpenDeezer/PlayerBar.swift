@@ -61,8 +61,17 @@ struct PlayerBar: View {
                 Text(app.current?.name ?? "Nothing playing")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(DZ.textPri)
                     .lineLimit(1)
-                Text(subtitleText)
-                    .font(.system(size: 11)).foregroundStyle(DZ.textSec).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(subtitleText)
+                        .font(.system(size: 11)).foregroundStyle(DZ.textSec).lineLimit(1)
+                    if app.current != nil && !app.outputFormat.isEmpty {
+                        Text(app.outputFormat)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(DZ.accent)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(DZ.accent.opacity(0.15), in: Capsule())
+                    }
+                }
                 scrubber
             }
         }

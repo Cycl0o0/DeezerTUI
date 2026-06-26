@@ -5,13 +5,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # List every Qt component explicitly (Qt >= 6.7.2 requires it).
-find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
+# DBus powers the MPRIS2 media-controls bridge (system overlay / media keys).
+find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent DBus)
 find_package(Threads REQUIRED)
 qt_standard_project_setup()            # enables AUTOMOC/UIC/RCC
 
 qt_add_executable(opendeezer-kde
     src/main.cpp
     src/mainwindow.cpp
+    src/mpris.cpp
+    src/settingsdialog.cpp
 )
 
 # The generated C header (libdeezercore.h) lives in lib/, next to the archive.
@@ -29,6 +32,7 @@ set_target_properties(deezercore PROPERTIES
 target_link_libraries(opendeezer-kde PRIVATE
     Qt6::Widgets
     Qt6::Concurrent
+    Qt6::DBus
     deezercore
     Threads::Threads      # -pthread
     asound

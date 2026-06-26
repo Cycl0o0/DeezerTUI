@@ -212,6 +212,20 @@ func DZHighQuality() C.int {
 	return 0
 }
 
+// DZFormat returns a human label for the current stream's actual format
+// (e.g. "FLAC · lossless", "MP3 · 320 kbps"), or "" if nothing is playing.
+//
+//export DZFormat
+func DZFormat() *C.char {
+	mu.Lock()
+	p := player
+	mu.Unlock()
+	if p == nil {
+		return C.CString("")
+	}
+	return C.CString(deezer.FormatLabel(p.Format()))
+}
+
 //export DZUserID
 func DZUserID() *C.char {
 	mu.Lock()

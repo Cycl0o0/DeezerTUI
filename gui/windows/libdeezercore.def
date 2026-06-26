@@ -27,3 +27,5 @@ EXPORTS
   DZFree
   DZFetch
   DZFreeBytes
+  DZSetQuality
+  DZHighQuality

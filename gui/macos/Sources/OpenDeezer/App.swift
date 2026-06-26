@@ -20,6 +20,11 @@ struct OpenDeezerApp: App {
             CommandGroup(replacing: .appInfo) {
                 Button("About OpenDeezer") { app.showCredits = true }
             }
+            // Standard ⌘, opens our Settings sheet.
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { app.showSettings = true }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }
@@ -41,6 +46,7 @@ struct RootView: View {
         }
         .background(DZ.windowBG)
         .sheet(isPresented: $app.showCredits) { CreditsView() }
+        .sheet(isPresented: $app.showSettings) { SettingsView() }
     }
 }
 
@@ -48,7 +54,7 @@ struct LoginGate: View {
     @EnvironmentObject var app: AppState
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "waveform.circle.fill")
+            Image(systemName: "heart.fill")
                 .font(.system(size: 56)).foregroundStyle(DZ.accent)
             Text("OpenDeezer").font(.system(size: 34, weight: .bold)).foregroundStyle(DZ.textPri)
             if app.busy {
@@ -131,6 +137,10 @@ struct AccountRow: View {
                     .font(.system(size: 11)).foregroundStyle(DZ.textSec)
             }
             Spacer()
+            Button { app.showSettings = true } label: {
+                Image(systemName: "gearshape").foregroundStyle(DZ.textSec)
+            }
+            .buttonStyle(.plain).help("Settings")
             Button { app.showCredits = true } label: {
                 Image(systemName: "info.circle").foregroundStyle(DZ.textSec)
             }
@@ -151,7 +161,7 @@ struct CreditsView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "waveform.circle.fill")
+            Image(systemName: "heart.fill")
                 .font(.system(size: 52)).foregroundStyle(DZ.accent)
             Text("OpenDeezer").font(.system(size: 26, weight: .bold)).foregroundStyle(DZ.textPri)
             Text("v\(version) · An open source reimplementation of Deezer")
