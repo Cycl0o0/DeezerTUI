@@ -1,0 +1,6 @@
+# Generated Go engine archive + header
+/lib/
+# Meson build tree
+/build/
+# Final binary copied up by build.sh
+/opendeezer-gnome

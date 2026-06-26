@@ -14,8 +14,8 @@ several native front-ends sit on top of it.
 |--------|-------|--------|
 | **Terminal (TUI)** | Go · Bubble Tea | ✅ |
 | **macOS** | SwiftUI · Liquid Glass (macOS 26) | ✅ `gui/macos` |
-| **GNOME** | GTK4 · libadwaita | 🚧 `gui/gnome` |
-| **KDE** | Qt6 | 🚧 `gui/kde` |
+| **GNOME** | GTK4 · libadwaita | ✅ `gui/gnome` |
+| **KDE** | Qt6 Widgets · Breeze | ✅ `gui/kde` |
 
 The macOS/GNOME/KDE apps link the engine as a C archive (`corelib`,
 `go build -buildmode=c-archive`) and are UI only. The sections below cover the

@@ -1,0 +1,9 @@
+# CMake build tree
+/build/
+
+# Final binary
+/opendeezer-kde
+
+# Generated Go c-archive + header
+/lib/libdeezercore.a
+/lib/libdeezercore.h
