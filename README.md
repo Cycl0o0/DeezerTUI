@@ -94,6 +94,40 @@ ARL ─login (gw-light)→ browse (gw + public REST)
 - `corelib` — the engine exposed as a C ABI (`-buildmode=c-archive` for
   macOS/Linux, `-buildmode=c-shared` DLL for Windows) so the native GUIs link it.
 
+## Build from source
+
+Clone the repo, then build whichever client you want — they all build the same
+Go engine (`corelib`) underneath. Each `build.sh` / `build.ps1` compiles the
+engine first, then the native app.
+
+**Terminal (any OS)** — Go 1.24+ (Linux also needs `libasound2-dev`):
+```sh
+go build -o opendeezer ./cmd/opendeezer      # or: make build
+```
+
+**macOS app** — macOS 26 (Tahoe) + Xcode 26, Go:
+```sh
+cd gui/macos && make app        # -> OpenDeezer.app (universal: Apple Silicon + Intel)
+```
+
+**Linux — unified** (auto-picks GTK/Qt) — `libgtk-4-dev libadwaita-1-dev
+libjson-glib-dev qt6-base-dev libasound2-dev meson ninja-build cmake` + gcc, Go:
+```sh
+cd gui/linux && ./build.sh && ./dist/opendeezer
+```
+
+**Linux — single toolkit:**
+```sh
+cd gui/gnome && ./build.sh && ./opendeezer-gnome     # GTK4 / libadwaita
+cd gui/kde   && ./build.sh && ./opendeezer-kde       # Qt6 / Breeze
+```
+
+**Windows app** — Windows 10/11, Visual Studio 2022 + Windows App SDK,
+MinGW-w64 (Go cgo), Go:
+```powershell
+cd gui\windows; .\build.ps1     # -> bin\x64\Release\OpenDeezer.exe
+```
+
 ## FAQ
 
 **What's an ARL?**
