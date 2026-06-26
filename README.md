@@ -94,6 +94,53 @@ ARL ─login (gw-light)→ browse (gw + public REST)
 - `corelib` — the engine exposed as a C ABI (`-buildmode=c-archive` for
   macOS/Linux, `-buildmode=c-shared` DLL for Windows) so the native GUIs link it.
 
+## FAQ
+
+**What's an ARL?**
+Your Deezer session token — the `arl` cookie from a logged-in `deezer.com`
+browser session. It authenticates you the same way the official app does. Treat
+it like a password; it only ever lives on your own machine.
+
+**Why does it need my Deezer login (ARL) instead of an API key?**
+Deezer's public API doesn't allow full-track streaming. The only way to play
+your music is the same authenticated path the official client uses, which needs
+your session (the ARL).
+
+**Why Deezer Premium only?**
+Streaming full, high-quality tracks (and FLAC) is a Premium entitlement. A free
+account can't stream full tracks the way OpenDeezer plays them. OpenDeezer only
+plays content your own account is already entitled to.
+
+**Why can't I download / save tracks?**
+OpenDeezer is a *player*, not a ripper. It decrypts and decodes each track **in
+memory** to play it — it never writes tracks to disk. Saving decrypted files
+would be piracy; that's deliberately not what this does. Stream your own
+entitled music, like the official app.
+
+**Does my ARL get uploaded anywhere?**
+No. Login, decrypt and decode all run on your machine; the only requests that
+leave are to Deezer itself. The in-browser config generator never uploads your
+token either.
+
+**Is this legal? Will my account get banned?**
+Grey zone. It reaches Deezer the unofficial way and decrypts your own entitled
+content locally, which almost certainly breaks Deezer's terms for third-party
+apps. Personal/educational use, your own Premium account, your own risk. Not
+affiliated with Deezer.
+
+**Does it support HiFi / FLAC?**
+Yes — if your account is HiFi-entitled. Pick HiFi in settings (or press `h` in
+the TUI); it streams lossless FLAC and falls back to MP3 when a track or account
+isn't entitled.
+
+**Why not just use the official app?**
+Mostly because it's a reverse-engineering project and a learning exercise. You
+also get lightweight, local-first native clients (including a terminal one), no
+telemetry, on platforms the official app may not serve.
+
+**Is it open source?**
+Yes, AGPL-3.0. Read it, build it, audit exactly what it does.
+
 ## The fine print
 
 Personal/educational use, your own Premium account, your own risk. It reaches
