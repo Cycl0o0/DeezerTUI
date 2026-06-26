@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,8 +30,21 @@ type Client struct {
 	licenseToken string
 	sid          string
 	userID       string
+	quality      int32 // 0 = MP3_128 (default), 1 = MP3_320 — set atomically
 	http         *http.Client
 }
+
+// SetHighQuality selects MP3_320 (true) or MP3_128 (false) for new streams.
+func (c *Client) SetHighQuality(high bool) {
+	var v int32
+	if high {
+		v = 1
+	}
+	atomic.StoreInt32(&c.quality, v)
+}
+
+// HighQuality reports whether MP3_320 is preferred.
+func (c *Client) HighQuality() bool { return atomic.LoadInt32(&c.quality) == 1 }
 
 // New builds a client for the given ARL (not yet logged in).
 func New(arl string) *Client {
@@ -451,10 +465,14 @@ func (c *Client) resolveMediaURL(trackToken string) (urlStr, format string, err 
 	if c.licenseToken == "" || trackToken == "" {
 		return "", "", fmt.Errorf("missing license or track token")
 	}
-	body := fmt.Sprintf(`{"license_token":"%s","media":[{"type":"FULL","formats":[`+
-		`{"cipher":"BF_CBC_STRIPE","format":"MP3_128"},`+
-		`{"cipher":"BF_CBC_STRIPE","format":"MP3_320"}]}],`+
-		`"track_tokens":["%s"]}`, c.licenseToken, trackToken)
+	// Format order is preference order (Deezer returns the first entitled one).
+	// High quality prefers MP3_320, else MP3_128 for bandwidth.
+	formats := `{"cipher":"BF_CBC_STRIPE","format":"MP3_128"},{"cipher":"BF_CBC_STRIPE","format":"MP3_320"}`
+	if atomic.LoadInt32(&c.quality) == 1 {
+		formats = `{"cipher":"BF_CBC_STRIPE","format":"MP3_320"},{"cipher":"BF_CBC_STRIPE","format":"MP3_128"}`
+	}
+	body := fmt.Sprintf(`{"license_token":"%s","media":[{"type":"FULL","formats":[%s]}],`+
+		`"track_tokens":["%s"]}`, c.licenseToken, formats, trackToken)
 
 	req, err := http.NewRequest(http.MethodPost, mediaURL, bytes.NewReader([]byte(body)))
 	if err != nil {

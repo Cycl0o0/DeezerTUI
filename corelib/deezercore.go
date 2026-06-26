@@ -172,6 +172,27 @@ func DZLastErrorJSON() *C.char {
 	return jsonStr(map[string]string{"error": msg}, nil)
 }
 
+//export DZSetQuality
+func DZSetQuality(high C.int) {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c != nil {
+		c.SetHighQuality(high != 0)
+	}
+}
+
+//export DZHighQuality
+func DZHighQuality() C.int {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c != nil && c.HighQuality() {
+		return 1
+	}
+	return 0
+}
+
 //export DZUserID
 func DZUserID() *C.char {
 	mu.Lock()
