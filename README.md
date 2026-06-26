@@ -16,10 +16,13 @@ several native front-ends sit on top of it.
 | **macOS** | SwiftUI · Liquid Glass (macOS 26) | ✅ `gui/macos` |
 | **GNOME** | GTK4 · libadwaita | ✅ `gui/gnome` |
 | **KDE** | Qt6 Widgets · Breeze | ✅ `gui/kde` |
+| **Windows** | WinUI 3 · C++/WinRT · Fluent | 🚧 `gui/windows` |
 
-The macOS/GNOME/KDE apps link the engine as a C archive (`corelib`,
-`go build -buildmode=c-archive`) and are UI only. The sections below cover the
-terminal client; see each `gui/<platform>/README.md` for the GUIs.
+The macOS/GNOME/KDE apps link the engine as a C **archive** (`corelib`,
+`go build -buildmode=c-archive`); the Windows app calls it as a C-ABI **DLL**
+(`go build -buildmode=c-shared` → `libdeezercore.dll`) from MSVC C++/WinRT. All
+are UI only. The sections below cover the terminal client; see each
+`gui/<platform>/README.md` for the GUIs.
 
 By **Cycl0o0**.
 
