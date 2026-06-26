@@ -195,6 +195,9 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 func (p *Player) SeekMS(ms int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// A decode/seek fault must never abort the host process (the GUI links this
+	// in-process), so swallow any panic from go-mp3/oto.
+	defer func() { _ = recover() }()
 	if p.decoder == nil || p.cur == nil {
 		return
 	}
@@ -206,18 +209,24 @@ func (p *Player) SeekMS(ms int64) {
 	}
 	off := ms * bytesPerSec / 1000
 	off -= off % (channels * 2) // align to a whole stereo frame
+
+	wasPlaying := p.State() == Playing
+	// Stop the old player's read loop BEFORE seeking — go-mp3's decoder is not
+	// safe for concurrent Read+Seek, and the old oto player reads the same
+	// decoder on its own goroutine.
+	p.cur.Pause()
+	p.cur.Close()
+	p.cur = nil
+
 	if _, err := p.decoder.Seek(off, io.SeekStart); err != nil {
+		p.state.Store(int32(Stopped))
 		return
 	}
 	p.played.Store(off)
 
-	wasPlaying := p.State() == Playing
-	old := p.cur
 	np := p.ctx.NewPlayer(countReader{r: p.decoder, p: p})
 	np.SetVolume(p.Volume())
 	p.cur = np
-	old.Pause()
-	old.Close()
 	np.Play()
 	if !wasPlaying {
 		np.Pause()
