@@ -26,6 +26,10 @@ let package = Package(
                     // MPRemoteCommandCenter) + AppKit tray (NSStatusItem).
                     "-framework", "MediaPlayer",
                     "-framework", "AppKit",
+                    // Embedded Deezer login webview + arl-cookie capture
+                    // (WKWebView / WKHTTPCookieStore). System framework, no
+                    // external dependency — ships with the macOS SDK.
+                    "-framework", "WebKit",
                 ])
             ]
         ),

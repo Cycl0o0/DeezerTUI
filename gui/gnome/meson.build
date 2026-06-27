@@ -20,6 +20,11 @@ deps = [
   dependency('json-glib-1.0'),
   # GDBus (MPRIS) ships in gio; pulled in transitively by gtk4 but make explicit.
   dependency('gio-2.0'),
+  # Embedded Deezer login: the GTK4 WebKit port (header webkit/webkit.h).
+  dependency('webkitgtk-6.0'),
+  # The arl cookie is read back as a SoupCookie from the WebKit cookie manager
+  # (libsoup-3.0 is pulled in by webkitgtk-6.0; declared here for its symbols).
+  dependency('libsoup-3.0'),
 ]
 
 # Embedded resources (app icon) compiled into the binary.

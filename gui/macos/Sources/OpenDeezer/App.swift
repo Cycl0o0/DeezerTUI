@@ -45,6 +45,7 @@ struct RootView: View {
             }
         }
         .background(DZ.windowBG)
+        .sheet(isPresented: $app.showLoginWeb) { DeezerLoginSheet() }
         .sheet(isPresented: $app.showCredits) { CreditsView() }
         .sheet(isPresented: $app.showSettings) { SettingsView() }
         .sheet(isPresented: $app.showLyrics) { LyricsView() }
@@ -55,16 +56,47 @@ struct RootView: View {
 
 struct LoginGate: View {
     @EnvironmentObject var app: AppState
+    @State private var showManual = false
+
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
             Image(systemName: "heart.fill")
                 .font(.system(size: 56)).foregroundStyle(DZ.accent)
             Text("OpenDeezer").font(.system(size: 34, weight: .bold)).foregroundStyle(DZ.textPri)
+
             if app.busy {
                 ProgressView("Logging in…").tint(DZ.accent)
-            } else if let e = app.loginError {
-                Text(e).foregroundStyle(.red).multilineTextAlignment(.center).frame(maxWidth: 400)
-                Button("Retry") { app.start() }.tint(DZ.accent)
+            } else {
+                // Primary: open the embedded Deezer login webview. The arl cookie
+                // is captured automatically once the user signs in.
+                Button { app.beginWebLogin() } label: {
+                    Label("Log in with Deezer", systemImage: "person.crop.circle")
+                        .frame(maxWidth: 260)
+                }
+                .buttonStyle(.glassProminent).tint(DZ.accent).controlSize(.large)
+
+                // Fallback: paste an ARL by hand.
+                Button(showManual ? "Hide manual ARL" : "Enter ARL manually") {
+                    withAnimation { showManual.toggle() }
+                }
+                .buttonStyle(.plain).font(.callout).foregroundStyle(DZ.textSec)
+
+                if showManual {
+                    VStack(spacing: 8) {
+                        SecureField("Paste your ARL cookie", text: $app.manualARL)
+                            .textFieldStyle(.roundedBorder).frame(maxWidth: 320)
+                            .onSubmit { app.loginWithManualARL() }
+                        Button("Sign in") { app.loginWithManualARL() }
+                            .buttonStyle(.glass).tint(DZ.accent)
+                            .disabled(app.manualARL.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    .transition(.opacity)
+                }
+
+                if let e = app.loginError {
+                    Text(e).foregroundStyle(.red)
+                        .multilineTextAlignment(.center).frame(maxWidth: 400)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

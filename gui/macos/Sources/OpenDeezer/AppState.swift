@@ -19,6 +19,11 @@ final class AppState: ObservableObject {
     @Published var showCredits = false
     @Published var showSettings = false
 
+    // Embedded Deezer login webview + manual-ARL fallback (LoginGate).
+    @Published var showLoginWeb = false
+    @Published var manualARL = ""
+    private var webLoginAttempted = false  // de-dupes cookie-observer firings
+
     // Persisted preferences (audio quality, close-to-tray).
     @Published var settings = AppSettings.load()
     private var started = false // guards start() against repeated onAppear
@@ -103,42 +108,89 @@ final class AppState: ObservableObject {
 
     // MARK: login
 
+    // start() runs once on launch. If a saved ARL exists we auto-log-in;
+    // otherwise we drop the user on LoginGate to log in with Deezer (or paste an
+    // ARL manually). onAppear can fire more than once, hence the `started` guard.
     func start() {
-        guard !started else { return } // onAppear can fire more than once
-        guard let arl = Self.loadARL(), !arl.isEmpty else {
-            loginError = "No ARL found. Set $DEEZER_ARL or ~/.config/opendeezer/arl.txt"
-            return
-        }
+        guard !started else { return }
         started = true
+        guard let arl = Self.loadARL(), !arl.isEmpty else {
+            return // no saved ARL — LoginGate offers the login options
+        }
+        attemptLogin(arl: arl, persist: false)
+    }
+
+    // User tapped "Log in with Deezer": open the embedded Deezer login webview.
+    func beginWebLogin() {
+        loginError = nil
+        webLoginAttempted = false
+        showLoginWeb = true
+    }
+
+    // Called by the embedded webview when a non-empty arl cookie is captured.
+    // De-duped so the cookie observer can fire repeatedly without re-attempting.
+    // On success the sheet dismisses into the app; on failure it stays open with
+    // the error banner so the user can retry or cancel into manual entry.
+    func webLoginCaptured(arl: String) {
+        let v = arl.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !v.isEmpty, !webLoginAttempted, !busy else { return }
+        webLoginAttempted = true
+        attemptLogin(arl: v, persist: true) { ok in
+            if ok { self.showLoginWeb = false }
+            else { self.webLoginAttempted = false } // allow a fresh capture/retry
+        }
+    }
+
+    // Manual ARL fallback (paste-the-cookie flow), kept alongside the webview.
+    func loginWithManualARL() {
+        let v = manualARL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !v.isEmpty, !busy else { return }
+        attemptLogin(arl: v, persist: true)
+    }
+
+    // Shared login path: DZInit off the main thread, then wire up the session on
+    // success or surface an error. `persist` writes the ARL to the config file the
+    // frontend reads at startup so the next launch auto-logs-in.
+    private func attemptLogin(arl: String, persist: Bool,
+                              completion: ((Bool) -> Void)? = nil) {
         busy = true
+        loginError = nil
         Task.detached {
             let ok = Core.initialize(arl: arl)
             // Plan/entitlements are populated by login; fetch off the main thread.
             let acct = ok ? Core.account() : nil
             await MainActor.run {
                 self.busy = false
-                self.loggedIn = ok
                 if ok {
-                    self.userID = Core.userID
-                    self.account = acct
-                    self.volume = Core.volume
-                    self.replayGain = Core.replayGain
-                    // Apply persisted audio quality + gapless/crossfade, claim the
-                    // OS Now Playing command handlers, and wire up the tray.
-                    Core.setQuality(self.settings.quality)
-                    Core.setGapless(self.settings.gapless)
-                    Core.setCrossfadeMS(self.settings.crossfadeMS)
-                    self.currentAudioDeviceID = Core.currentAudioDevice
-                    self.nowPlaying.registerCommands(app: self)
-                    self.tray.closeToTray = self.settings.closeToTray
-                    self.tray.attach(app: self)
-                    self.startTimer()
-                    self.loadFavorites()
+                    if persist { Self.saveARL(arl) }
+                    self.finishLogin(account: acct)
                 } else {
                     self.loginError = "Login failed — invalid or expired ARL."
                 }
+                completion?(ok)
             }
         }
+    }
+
+    // Post-login wiring shared by auto / web / manual login. Runs on the main
+    // actor after a successful DZInit.
+    private func finishLogin(account acct: Account?) {
+        loggedIn = true
+        userID = Core.userID
+        account = acct
+        volume = Core.volume
+        replayGain = Core.replayGain
+        // Apply persisted audio quality + gapless/crossfade, claim the OS Now
+        // Playing command handlers, and wire up the tray.
+        Core.setQuality(settings.quality)
+        Core.setGapless(settings.gapless)
+        Core.setCrossfadeMS(settings.crossfadeMS)
+        currentAudioDeviceID = Core.currentAudioDevice
+        nowPlaying.registerCommands(app: self)
+        tray.closeToTray = settings.closeToTray
+        tray.attach(app: self)
+        startTimer()
+        loadFavorites()
     }
 
     static func loadARL() -> String? {
@@ -153,6 +205,16 @@ final class AppState: ObservableObject {
             }
         }
         return nil
+    }
+
+    // Persist the ARL to the SAME file loadARL() reads first (~/.config/opendeezer
+    // /arl.txt) so the next launch auto-logs-in without the webview.
+    static func saveARL(_ arl: String) {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/opendeezer", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("arl.txt")
+        try? arl.write(to: url, atomically: true, encoding: .utf8)
     }
 
     // Sidebar/about label for the signed-in account, e.g. "Jane · Premium".

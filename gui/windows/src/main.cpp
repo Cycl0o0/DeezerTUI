@@ -14,6 +14,12 @@
 // DispatcherQueueTimer polls cheap player state and auto-advances when
 // DZFinishedCount() increments.
 //
+// Login: on startup a saved/env ARL is tried silently; otherwise a chooser offers
+// "Log in with Deezer" -- a WebView2 (Microsoft.UI.Xaml.Controls.WebView2) pointed
+// at the Deezer web login whose CoreWebView2 cookie store is polled until the
+// HttpOnly "arl" cookie appears, then captured and persisted to
+// %APPDATA%\opendeezer\arl.txt -- with manual ARL entry kept as a fallback.
+//
 // OS integration (added):
 //   * SystemMediaTransportControls (SMTC) -- the system media overlay / lock
 //     screen / media keys. Acquired via ISystemMediaTransportControlsInterop::
@@ -53,6 +59,8 @@
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Microsoft.UI.Xaml.Input.h>
+
+#include <winrt/Microsoft.Web.WebView2.Core.h>    // CoreWebView2 + CookieManager (arl capture)
 
 #include <microsoft.ui.xaml.window.h>             // IWindowNative (HWND from Window)
 #include <systemmediatransportcontrolsinterop.h>  // ISystemMediaTransportControlsInterop
@@ -142,6 +150,7 @@ namespace wut   = winrt::Windows::UI::Text;
 namespace wsys  = winrt::Windows::System;
 namespace wm    = winrt::Windows::Media;
 namespace wf    = winrt::Windows::Foundation;
+namespace wv2   = winrt::Microsoft::Web::WebView2::Core; // CoreWebView2 cookie store (arl capture)
 using winrt::box_value;
 using winrt::unbox_value_or;
 using winrt::hstring;
@@ -434,6 +443,17 @@ static std::wstring LoadArl() {
         }
     }
     return L"";
+}
+
+// Persist a captured/entered ARL to %APPDATA%\opendeezer\arl.txt -- the SAME file
+// LoadArl() reads at startup, so the next launch auto-logs-in. Mirrors SaveSettings.
+static void SaveArl(hstring const& arl) {
+    auto d = ConfigDir(); if (d.empty()) return;
+    CreateDirectoryW(d.c_str(), nullptr);
+    std::string s = to_string(arl);
+    std::wstring path = d + L"\\arl.txt";
+    std::ofstream f(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (f) f.write(s.data(), static_cast<std::streamsize>(s.size()));
 }
 
 // =============================================================================
@@ -970,42 +990,156 @@ private:
     }
 
     // ---- login --------------------------------------------------------------
+    // Startup: if a saved/env ARL exists try it silently; otherwise (or on a
+    // failed silent login) present the login chooser -- "Log in with Deezer"
+    // (embedded WebView2 + automatic arl-cookie capture) or manual ARL entry.
     fire_and_forget StartLogin() {
         auto strong = get_strong();
         std::wstring arlW = LoadArl();
-        if (arlW.empty()) {
-            ShowMessage(L"No ARL found",
-                L"Set %DEEZER_ARL% or write your ARL to %APPDATA%\\opendeezer\\arl.txt, then relaunch.");
-            m_nowTitle.Text(L"No ARL");
-            co_return;
-        }
-        hstring arl{ arlW };
+        if (arlW.empty()) { ShowLoginChoice(); co_return; }
+        co_await TryLogin(hstring{ arlW }, /*persist=*/false);
+    }
+
+    // Run DZInit(arl) off-thread; on success finish login (optionally persisting
+    // the ARL so the next launch auto-logs-in), on failure re-open the chooser.
+    wf::IAsyncAction TryLogin(hstring arl, bool persist) {
+        auto strong = get_strong();
+        m_nowTitle.Text(L"Logging in…");
         co_await winrt::resume_background();
         std::string s = to_string(arl);
         int ok = DZInit(s.data());
         co_await resume_foreground(m_win.DispatcherQueue());
         if (ok) {
-            m_loggedIn = true;
-            DZSetQuality(m_settings.quality); // apply persisted quality on startup
-            DZSetReplayGain(m_settings.replayGain ? 1 : 0); // apply persisted normalization
-            DZSetGapless(m_settings.gapless ? 1 : 0);       // apply persisted gapless
-            DZSetCrossfadeMS(m_settings.crossfadeMs);       // apply persisted crossfade
-            if (!m_settings.audioDevice.empty()) {          // apply persisted output device
-                std::string dev = to_string(m_settings.audioDevice);
-                DZSetAudioDevice(dev.data());
-            }
-            LoadAccount(); // fetch tier (name / offer / hq-hifi caps) for About + Settings
-            m_lastFinished = DZFinishedCount();
-            m_updatingVol = true; m_volume.Value(DZVolume() * 100.0); m_updatingVol = false;
-            m_timer.Start();
-            m_nowTitle.Text(L"Not playing");
-            m_nowArtist.Text(L"");
-            m_suppressNav = false;
-            m_nav.SelectedItem(m_likedItem); // -> OnNav -> LoadFavorites
+            if (persist) SaveArl(arl); // remember for next launch (same file LoadArl reads)
+            FinishLogin();
         } else {
             m_nowTitle.Text(L"Login failed");
-            ShowMessage(L"Login failed", L"Invalid or expired ARL.");
+            ShowMessage(L"Login failed", L"That ARL is invalid or expired. Try logging in again.");
+            ShowLoginChoice();
         }
+    }
+
+    // Shared success path: enable browsing, apply persisted prefs, show Liked.
+    void FinishLogin() {
+        m_loggedIn = true;
+        DZSetQuality(m_settings.quality); // apply persisted quality on startup
+        DZSetReplayGain(m_settings.replayGain ? 1 : 0); // apply persisted normalization
+        DZSetGapless(m_settings.gapless ? 1 : 0);       // apply persisted gapless
+        DZSetCrossfadeMS(m_settings.crossfadeMs);       // apply persisted crossfade
+        if (!m_settings.audioDevice.empty()) {          // apply persisted output device
+            std::string dev = to_string(m_settings.audioDevice);
+            DZSetAudioDevice(dev.data());
+        }
+        LoadAccount(); // fetch tier (name / offer / hq-hifi caps) for About + Settings
+        m_lastFinished = DZFinishedCount();
+        m_updatingVol = true; m_volume.Value(DZVolume() * 100.0); m_updatingVol = false;
+        m_timer.Start();
+        m_nowTitle.Text(L"Not playing");
+        m_nowArtist.Text(L"");
+        m_suppressNav = false;
+        m_nav.SelectedItem(m_likedItem); // -> OnNav -> LoadFavorites
+    }
+
+    // Login chooser: "Log in with Deezer" opens the embedded webview, "Enter ARL"
+    // is the manual fallback. Cancel leaves the app idle (relaunch to retry).
+    fire_and_forget ShowLoginChoice() {
+        auto strong = get_strong();
+        m_nowTitle.Text(L"Not signed in");
+        muxc::ContentDialog dlg;
+        dlg.XamlRoot(m_win.Content().XamlRoot());
+        dlg.Title(box_value(L"Sign in to Deezer"));
+        muxc::TextBlock t; t.TextWrapping(mux::TextWrapping::Wrap);
+        t.Text(L"Log in with your Deezer account in the in-app browser — OpenDeezer "
+               L"captures the login automatically, so you never have to copy an ARL by "
+               L"hand. (Advanced: you can still paste an ARL manually.)");
+        dlg.Content(t);
+        dlg.PrimaryButtonText(L"Log in with Deezer");
+        dlg.SecondaryButtonText(L"Enter ARL manually");
+        dlg.CloseButtonText(L"Cancel");
+        dlg.DefaultButton(muxc::ContentDialogButton::Primary);
+        auto res = co_await dlg.ShowAsync();
+        if (res == muxc::ContentDialogResult::Primary) {
+            hstring arl = co_await ShowWebLogin();
+            if (!arl.empty()) { co_await TryLogin(arl, /*persist=*/true); }
+            else              { ShowLoginChoice(); } // cancelled / webview unavailable
+        } else if (res == muxc::ContentDialogResult::Secondary) {
+            hstring entered = co_await PromptText(L"Log in with ARL",
+                                                  L"Paste your Deezer ARL", L"");
+            std::wstring w{ entered.c_str() }; Trim(w);
+            if (!w.empty()) { co_await TryLogin(hstring{ w }, /*persist=*/true); }
+            else            { ShowLoginChoice(); }
+        }
+        // Cancel: stay idle; nav stays empty until the user re-triggers login.
+    }
+
+    // Embedded Deezer login: host a WebView2 in a modal dialog pointed at the web
+    // login, then poll the CoreWebView2 cookie store until a non-empty "arl"
+    // cookie (domain .deezer.com) appears -- HttpOnly, so it is only readable via
+    // CookieManager.GetCookiesAsync (not document.cookie). Returns the captured
+    // ARL, or "" if the user cancels / the WebView2 runtime is unavailable.
+    wf::IAsyncOperation<hstring> ShowWebLogin() {
+        auto strong = get_strong();
+        m_capturedArl = L"";
+
+        m_loginDialog = muxc::ContentDialog();
+        m_loginDialog.XamlRoot(m_win.Content().XamlRoot());
+        m_loginDialog.Title(box_value(L"Log in with Deezer"));
+        // Let the dialog grow to fit the web page (defaults cap around 548 px).
+        m_loginDialog.Resources().Insert(box_value(hstring(L"ContentDialogMaxWidth")),  box_value(620.0));
+        m_loginDialog.Resources().Insert(box_value(hstring(L"ContentDialogMaxHeight")), box_value(740.0));
+
+        m_loginWebView = muxc::WebView2();
+        m_loginWebView.Width(560);
+        m_loginWebView.Height(640);
+        m_loginDialog.Content(m_loginWebView);
+        m_loginDialog.CloseButtonText(L"Cancel");
+
+        // Setting Source kicks off implicit CoreWebView2 init once the control is
+        // loaded (i.e. after the dialog shows). We must NOT co_await
+        // EnsureCoreWebView2Async() here: it would not complete until the control
+        // loads, which only happens after ShowAsync -> deadlock. The poll below
+        // simply waits for CoreWebView2() to become non-null.
+        try { m_loginWebView.Source(wf::Uri(L"https://www.deezer.com/login")); }
+        catch (...) { m_loginWebView = nullptr; m_loginDialog = nullptr; co_return hstring(L""); }
+
+        m_arlPollTimer = m_win.DispatcherQueue().CreateTimer();
+        m_arlPollTimer.Interval(std::chrono::milliseconds(700));
+        m_arlPollTimer.Tick({ get_weak(), &MainWindow::OnArlPoll });
+        m_arlPollTimer.Start();
+
+        co_await m_loginDialog.ShowAsync(); // returns when arl captured (Hide) or Cancel
+
+        if (m_arlPollTimer) { m_arlPollTimer.Stop(); m_arlPollTimer = nullptr; }
+        m_loginWebView = nullptr;
+        m_loginDialog  = nullptr;
+        co_return m_capturedArl;
+    }
+
+    // Cookie poll (UI thread): once CoreWebView2 is up, read the deezer.com cookie
+    // jar and, when a non-empty "arl" appears, stash it and close the dialog.
+    fire_and_forget OnArlPoll(mud::DispatcherQueueTimer const&, wf::IInspectable const&) {
+        auto strong = get_strong();
+        if (m_arlPollBusy || !m_loginWebView) co_return;
+        auto core = m_loginWebView.CoreWebView2();
+        if (!core) co_return;             // CoreWebView2 not initialized yet
+        m_arlPollBusy = true;
+        try {
+            auto cookies = co_await core.CookieManager().GetCookiesAsync(L"https://www.deezer.com");
+            if (m_loginWebView) {         // dialog still open after the await
+                for (auto const& c : cookies) {
+                    if (c.Name() == L"arl") {
+                        hstring v = c.Value();
+                        if (!v.empty()) {
+                            m_capturedArl = v;
+                            if (m_arlPollTimer) m_arlPollTimer.Stop();
+                            if (m_loginDialog)  m_loginDialog.Hide();
+                        }
+                        break;
+                    }
+                }
+            }
+        } catch (...) {}
+        m_arlPollBusy = false;
     }
 
     // ---- navigation ---------------------------------------------------------
@@ -2260,6 +2394,13 @@ private:
     bool m_loggedIn = false, m_shuffle = false, m_updatingSeek = false, m_updatingVol = false, m_suppressNav = false;
     int  m_lastFinished = 0, m_artGen = 0, m_playGen = 0, m_queueIndex = -1, m_repeat = 0;
     std::chrono::steady_clock::time_point m_lastSeek{};
+
+    // ---- login (embedded Deezer webview + automatic arl-cookie capture) ------
+    muxc::WebView2            m_loginWebView{ nullptr };
+    muxc::ContentDialog       m_loginDialog{ nullptr };
+    mud::DispatcherQueueTimer m_arlPollTimer{ nullptr };
+    hstring m_capturedArl;             // set by OnArlPoll when the arl cookie appears
+    bool    m_arlPollBusy = false;     // guards overlapping GetCookiesAsync polls
 
     // OS integration state
     Settings m_settings{};

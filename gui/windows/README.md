@@ -46,11 +46,28 @@ into the output folder, so it runs with no separate runtime install. The Go DLL
 is built `-extldflags=-static`, so `libdeezercore.dll` ships alone (no
 `libwinpthread`/`libgcc`).
 
-## ARL
+## Login
 
-Login reads the ARL from `%DEEZER_ARL%`, or `%APPDATA%\opendeezer\arl.txt`. Your
-ARL is the `arl` cookie from an authenticated `deezer.com` session — treat it like
-a password.
+On first launch the app shows a **"Log in with Deezer"** chooser. Picking it opens
+an embedded **WebView2** (`Microsoft.UI.Xaml.Controls.WebView2`) pointed at the
+Deezer web login; once you sign in, OpenDeezer polls the `CoreWebView2`
+cookie store (`CookieManager.GetCookiesAsync`) for the `arl` cookie — which is
+`HttpOnly`, so it is only readable there, not via `document.cookie` — captures it
+automatically, starts the session with `DZInit`, and writes it to
+`%APPDATA%\opendeezer\arl.txt` so the next launch logs in automatically. No manual
+ARL copy needed.
+
+Restoring this needs the **Microsoft Edge WebView2 Runtime** (the Evergreen
+runtime ships with Windows 11 / current Edge and is preinstalled on the CI
+runner). The build pulls the `Microsoft.Web.WebView2` SDK via NuGet
+(`PackageReference` in the `.vcxproj`).
+
+### Manual ARL (fallback)
+
+You can still log in by ARL directly: choose **"Enter ARL manually"** in the
+chooser, or pre-seed `%DEEZER_ARL%` / `%APPDATA%\opendeezer\arl.txt` before launch.
+Your ARL is the `arl` cookie from an authenticated `deezer.com` session — treat it
+like a password.
 
 ## Architecture
 

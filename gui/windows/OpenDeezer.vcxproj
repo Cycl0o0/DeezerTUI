@@ -96,6 +96,11 @@
     <PackageReference Include="Microsoft.Windows.CppWinRT" Version="2.0.240405.15" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250205002" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" />
+    <!-- WebView2 SDK: the Microsoft.UI.Xaml.Controls.WebView2 control + the
+         Microsoft.Web.WebView2.Core projection (CoreWebView2 cookie store) used by
+         the "Log in with Deezer" flow. Restored by NuGet; the WebView2 *runtime*
+         (Microsoft Edge WebView2 Runtime) is preinstalled on Windows / the runner. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
