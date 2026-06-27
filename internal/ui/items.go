@@ -10,6 +10,7 @@ const (
 	rowTrack
 	rowPlaylist
 	rowAlbum
+	rowArtist
 )
 
 // menuAction is the action a rowMenu triggers.
@@ -19,6 +20,8 @@ const (
 	actLiked menuAction = iota
 	actPlaylists
 	actSearch
+	actCharts
+	actResume
 )
 
 // row is a single list entry. It implements bubbles/list.Item.
@@ -26,10 +29,11 @@ type row struct {
 	kind     rowKind
 	title    string
 	desc     string
-	action   menuAction       // for rowMenu
-	track    deezer.Track     // for rowTrack
-	playlist deezer.Playlist  // for rowPlaylist
-	album    deezer.Album     // for rowAlbum
+	action   menuAction        // for rowMenu
+	track    deezer.Track      // for rowTrack
+	playlist deezer.Playlist   // for rowPlaylist
+	album    deezer.Album      // for rowAlbum
+	artist   deezer.ArtistInfo // for rowArtist
 }
 
 func (r row) Title() string       { return r.title }
@@ -53,5 +57,9 @@ func albumRow(a deezer.Album) row {
 	if len(a.Artists) > 0 {
 		name = a.Artists[0].Name
 	}
-	return row{kind: rowAlbum, title: a.Name, desc: name, album: a}
+	return row{kind: rowAlbum, title: "💿 " + a.Name, desc: name, album: a}
+}
+
+func artistRow(a deezer.ArtistInfo) row {
+	return row{kind: rowArtist, title: "♪ " + a.Name, desc: "artist", artist: a}
 }

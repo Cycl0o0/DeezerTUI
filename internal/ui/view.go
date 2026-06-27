@@ -33,6 +33,12 @@ func (m *Model) View() string {
 		body = m.nowPlayingView()
 	case screenCredits:
 		body = m.creditsView()
+	case screenQueue:
+		body = m.queueView()
+	case screenLyrics:
+		body = m.lyricsView()
+	case screenHelp:
+		body = m.helpView()
 	default:
 		body = m.list.View()
 	}
@@ -82,8 +88,7 @@ func (m *Model) creditsView() string {
 
 func (m *Model) nowPlayingView() string {
 	var meta []string
-	if m.qIndex >= 0 && m.qIndex < len(m.queue) {
-		t := m.queue[m.qIndex]
+	if t, ok := m.q.Current(); ok {
 		meta = []string{
 			accent.Render(t.Name),
 			t.ArtistLine(),
@@ -129,8 +134,9 @@ func padTo(lines []string, n int) string {
 func (m *Model) footer() string {
 	st := m.player.State()
 	var now string
-	if m.qIndex >= 0 && m.qIndex < len(m.queue) && (m.playing || st == audio.Playing || st == audio.Paused) {
-		t := m.queue[m.qIndex]
+	cur, hasCur := m.q.Current()
+	if hasCur && (m.playing || st == audio.Playing || st == audio.Paused) {
+		t := cur
 		icon := "▶"
 		if st == audio.Paused {
 			icon = "⏸"
@@ -151,12 +157,12 @@ func (m *Model) footer() string {
 	bar := m.progressBar()
 
 	shuf := "off"
-	if m.shuffle {
+	if m.q.Shuffle() {
 		shuf = "on"
 	}
 	help := dim.Render(fmt.Sprintf(
-		"space pause · n/p next/prev · z shuffle:%s · r repeat:%s · +/- vol:%d%% · / search · h quality(N/H/HiFi) · c cover · ? credits · q quit",
-		shuf, m.repeat.String(), int(m.player.Volume()*100+0.5)))
+		"space play · n/p · z shuf:%s · r rep:%s · +/- %d%% · / search · l lyrics · u queue · h qual · ? help · q quit",
+		shuf, m.q.Repeat().String(), int(m.player.Volume()*100+0.5)))
 
 	status := ""
 	if m.status != "" {
@@ -196,4 +202,110 @@ func fmtMS(ms int64) string {
 	}
 	s := ms / 1000
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
+}
+
+// queueView lists the upcoming tracks with the current one highlighted.
+func (m *Model) queueView() string {
+	ts := m.q.Tracks()
+	if len(ts) == 0 {
+		return padTo([]string{dim.Render("Queue is empty.")}, max(1, m.height-footerHeight))
+	}
+	cur := m.q.Index()
+	rows := max(1, m.height-footerHeight-2)
+	lines := []string{accent.Render(fmt.Sprintf("Queue (%d tracks)", len(ts))), ""}
+	// Window around the current track so long queues stay readable.
+	start := 0
+	if cur > rows/2 {
+		start = cur - rows/2
+	}
+	for i := start; i < len(ts) && len(lines) < rows; i++ {
+		t := ts[i]
+		marker := "  "
+		line := fmt.Sprintf("%2d. %s — %s", i+1, t.Name, t.ArtistLine())
+		if i == cur {
+			marker = accent.Render("▶ ")
+			line = accent.Render(line)
+		} else {
+			line = dim.Render(line)
+		}
+		lines = append(lines, marker+line)
+	}
+	return padTo(lines, max(1, m.height-footerHeight))
+}
+
+// lyricsView shows lyrics; synced lyrics auto-scroll with playback position and
+// highlight the current line.
+func (m *Model) lyricsView() string {
+	t, ok := m.q.Current()
+	if !ok {
+		return padTo([]string{dim.Render("Nothing playing.")}, max(1, m.height-footerHeight))
+	}
+	header := accent.Render(t.Name) + dim.Render(" — "+t.ArtistLine())
+	if m.lyrics == nil {
+		return padTo([]string{header, "", dim.Render("(loading lyrics…)")}, max(1, m.height-footerHeight))
+	}
+	rows := max(3, m.height-footerHeight-2)
+
+	if m.lyrics.IsSynced() {
+		pos := m.player.PositionMS()
+		active := 0
+		for i, ln := range m.lyrics.Synced {
+			if ln.TimeMS <= pos {
+				active = i
+			}
+		}
+		lines := []string{header, ""}
+		start := 0
+		if active > rows/2 {
+			start = active - rows/2
+		}
+		for i := start; i < len(m.lyrics.Synced) && len(lines) < rows+2; i++ {
+			ln := m.lyrics.Synced[i].Text
+			if i == active {
+				lines = append(lines, accent.Render(ln))
+			} else {
+				lines = append(lines, dim.Render(ln))
+			}
+		}
+		return padTo(lines, max(1, m.height-footerHeight))
+	}
+
+	if m.lyrics.Plain == "" {
+		return padTo([]string{header, "", dim.Render("(no lyrics available)")}, max(1, m.height-footerHeight))
+	}
+	lines := append([]string{header, ""}, strings.Split(m.lyrics.Plain, "\n")...)
+	return padTo(lines, max(1, m.height-footerHeight))
+}
+
+// helpView lists every keybinding.
+func (m *Model) helpView() string {
+	binds := [][2]string{
+		{"↑/↓ or j/k", "move selection"},
+		{"g / G", "jump to top / bottom"},
+		{"enter", "play track / open album·artist·playlist / menu action"},
+		{"/", "search (tracks, artists, albums, playlists)"},
+		{"space", "play / pause"},
+		{"n / p", "next / previous track"},
+		{"← / →", "seek −10s / +10s"},
+		{"+ / -", "volume up / down"},
+		{"z", "toggle shuffle"},
+		{"r", "cycle repeat (off → all → one)"},
+		{"h", "cycle quality (Normal → High → HiFi)"},
+		{"R", "toggle ReplayGain (loudness normalization)"},
+		{"l", "lyrics (synced when available)"},
+		{"u", "queue view"},
+		{"c", "now playing / cover"},
+		{"t", "cycle theme"},
+		{"s", "stop"},
+		{"i", "about / credits"},
+		{"? ", "this help"},
+		{"esc", "back"},
+		{"q", "quit"},
+	}
+	lines := []string{accent.Render("Keybindings"), ""}
+	for _, b := range binds {
+		lines = append(lines, "  "+accent.Render(fmt.Sprintf("%-12s", b[0]))+dim.Render(b[1]))
+	}
+	lines = append(lines, "", dim.Render("? or esc to go back"))
+	return padTo(lines, max(1, m.height-footerHeight))
 }

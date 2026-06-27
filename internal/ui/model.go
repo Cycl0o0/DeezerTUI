@@ -10,6 +10,7 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 	"github.com/Cycl0o0/OpenDeezer/internal/mpris"
+	"github.com/Cycl0o0/OpenDeezer/internal/queue"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -27,27 +28,10 @@ const (
 	screenSearch
 	screenNowPlaying
 	screenCredits
+	screenQueue
+	screenLyrics
+	screenHelp
 )
-
-// repeatMode mirrors core::RepeatMode.
-type repeatMode int
-
-const (
-	repeatOff repeatMode = iota
-	repeatAll
-	repeatOne
-)
-
-func (r repeatMode) String() string {
-	switch r {
-	case repeatAll:
-		return "all"
-	case repeatOne:
-		return "one"
-	default:
-		return "off"
-	}
-}
 
 // Model is the root Bubble Tea model.
 type Model struct {
@@ -70,13 +54,16 @@ type Model struct {
 	curImgTrack string
 	curCover    string // rendered half-block cover
 
-	// playback queue
-	queue   []deezer.Track
-	qIndex  int
-	repeat  repeatMode
-	shuffle bool
-	history []int // visited queue indices, for prev under shuffle
-	playing bool  // a track is loaded/playing
+	// playback queue (shared model, see internal/queue)
+	q       *queue.Queue
+	playing bool // a track is loaded/playing
+
+	// lyrics for the current track (lazily fetched on the lyrics screen)
+	lyrics      *deezer.Lyrics
+	lyricsTrack string
+
+	acct        deezer.Account // logged-in plan + entitlements
+	pendingSeek int64          // ms to seek to once the next stream is ready (resume)
 
 	media mpris.Controller // OS media controls (MPRIS on Linux, no-op elsewhere)
 
@@ -117,8 +104,7 @@ func (m *Model) publishMedia() {
 	default:
 		s.Status = "Stopped"
 	}
-	if m.qIndex >= 0 && m.qIndex < len(m.queue) {
-		t := m.queue[m.qIndex]
+	if t, ok := m.q.Current(); ok {
 		s.TrackID = t.ID
 		s.Title = t.Name
 		s.Artist = t.ArtistLine()
@@ -152,6 +138,7 @@ func New(client *deezer.Client, player *audio.Player) *Model {
 		spinner:  sp,
 		status:   "Logging in…",
 		loading:  true,
+		q:        queue.New(),
 		finished: make(chan struct{}, 1),
 	}
 	player.SetOnFinish(func() {
@@ -160,6 +147,8 @@ func New(client *deezer.Client, player *audio.Player) *Model {
 		default:
 		}
 	})
+	m.applyThemeByName(LoadTheme())
+	player.SetReplayGain(LoadReplayGain())
 	return m
 }
 
@@ -176,6 +165,11 @@ type playlistsMsg struct {
 	playlists []deezer.Playlist
 }
 type searchMsg struct{ results *deezer.SearchResults }
+type lyricsMsg struct {
+	trackID string
+	lyrics  *deezer.Lyrics
+	err     error
+}
 type streamReadyMsg struct {
 	plan  *deezer.StreamPlan
 	track deezer.Track
@@ -260,6 +254,35 @@ func (m *Model) searchCmd(q string) tea.Cmd {
 			return errMsg{err}
 		}
 		return searchMsg{results: r}
+	}
+}
+
+func (m *Model) chartsCmd() tea.Cmd {
+	return func() tea.Msg {
+		ch, err := m.client.Charts("0")
+		if err != nil {
+			return errMsg{err}
+		}
+		return searchMsg{results: &deezer.SearchResults{
+			Tracks: ch.Tracks, Albums: ch.Albums, Artists: ch.Artists, Playlists: ch.Playlists,
+		}}
+	}
+}
+
+func (m *Model) artistTopCmd(a deezer.ArtistInfo) tea.Cmd {
+	return func() tea.Msg {
+		ts, err := m.client.ArtistTop(a.ID)
+		if err != nil {
+			return errMsg{err}
+		}
+		return tracksMsg{title: "♪ " + a.Name, tracks: ts}
+	}
+}
+
+func (m *Model) lyricsCmd(t deezer.Track) tea.Cmd {
+	return func() tea.Msg {
+		l, err := m.client.Lyrics(t.ID)
+		return lyricsMsg{trackID: t.ID, lyrics: l, err: err}
 	}
 }
 
