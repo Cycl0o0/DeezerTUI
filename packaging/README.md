@@ -19,9 +19,14 @@ run `updpkgsums` to fill `sha256sums`, regenerate `.SRCINFO`
 yay -S opendeezer
 ```
 
-## Flatpak (`flatpak/org.opendeezer.OpenDeezer.yaml`)
-GNOME (GTK4) client; the GNOME runtime provides WebKitGTK for the login view.
-Local build:
+## Flatpak (`flatpak/*.yaml`)
+Three variants:
+- `org.opendeezer.OpenDeezer.yaml` — GNOME (GTK4) client, GNOME runtime (WebKitGTK).
+- `org.opendeezer.OpenDeezer.kde.yaml` — KDE (Qt6) client, KDE runtime (QtWebEngine).
+- `org.opendeezer.OpenDeezer.unified.yaml` — unified dlopen launcher on the KDE
+  runtime (Qt backend in-sandbox; GTK desktops use the GNOME variant).
+
+Local build (pick a manifest):
 ```sh
 flatpak-builder --user --install --force-clean build packaging/flatpak/org.opendeezer.OpenDeezer.yaml
 ```

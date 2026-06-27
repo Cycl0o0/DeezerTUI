@@ -1,0 +1,43 @@
+# Flatpak manifest for the OpenDeezer KDE (Qt6) client.
+#
+# The KDE runtime ships Qt6 incl. QtWebEngine (for the login web view); Go comes
+# from the freedesktop golang SDK extension.
+#
+# NOTE on Flathub: the build fetches Go modules, which Flathub's sandbox forbids
+# (no build-time network). For Flathub, vendor the modules and drop
+# `--share=network` (see flatpak-builder-tools / flatpak-go-mod). For a LOCAL
+# build the network build-arg below suffices.
+app-id: org.opendeezer.OpenDeezer.kde
+runtime: org.kde.Platform
+runtime-version: "6.8"
+sdk: org.kde.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.golang
+command: opendeezer-kde
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.mpris.MediaPlayer2.OpenDeezer
+build-options:
+  append-path: /usr/lib/sdk/golang/bin
+  env:
+    GOFLAGS: "-trimpath"
+modules:
+  - name: opendeezer-kde
+    buildsystem: simple
+    build-options:
+      build-args:
+        - --share=network
+    build-commands:
+      - cd gui/kde && chmod +x build.sh && ./build.sh
+      - install -Dm755 gui/kde/opendeezer-kde /app/bin/opendeezer-kde
+      - install -Dm644 gui/linux/org.opendeezer.OpenDeezer.desktop /app/share/applications/org.opendeezer.OpenDeezer.kde.desktop
+      - install -Dm644 gui/kde/opendeezer.png /app/share/icons/hicolor/256x256/apps/org.opendeezer.OpenDeezer.kde.png
+    sources:
+      - type: git
+        url: https://github.com/Cycl0o0/OpenDeezer.git
+        tag: v0.4.0
