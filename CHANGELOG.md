@@ -4,6 +4,19 @@ All notable changes to OpenDeezer are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0]
+
+### Fixed
+- **macOS GUI choppy audio**: malgo's CoreAudio period defaulted to ~10ms, so Go
+  GC pauses in the GUI process delayed the realtime audio callback and underran
+  the device. Use a larger device period (~400ms) so playback coasts through GC
+  pauses. (Confirmed fixed on macOS.)
+- **KDE login web view**: clicking "Log in with Deezer" closed the window —
+  QtWebEngine's GPU process crashes on Wayland/KDE. Force software GPU
+  (`QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`) so the login web view starts; the
+  view also no longer collapses to 0px. Added a File → "Log in / Switch account…"
+  action to reach login when already signed in. Manual ARL remains a fallback.
+
 ## [0.4.1]
 
 ### Fixed
