@@ -102,6 +102,13 @@ typedef struct {
   /* persisted settings (~/.config/opendeezer/settings.ini) */
   int                   quality;       /* 0 Normal(128), 1 High(320), 2 HiFi(FLAC) */
   gboolean              background;    /* keep playing on window close */
+  gboolean              replaygain;    /* loudness normalization (DZReplayGain) */
+
+  /* account tier — filled from DZAccountJSON after login */
+  char                 *acct_name;     /* display name */
+  char                 *acct_offer;    /* subscription/offer label */
+  gboolean              can_hq;        /* entitled to MP3 320 */
+  gboolean              can_hifi;      /* entitled to FLAC */
 
   /* MPRIS — OS media controls over the session bus (GDBus) */
   GDBusConnection      *bus;           /* set in on_bus_acquired */
@@ -117,10 +124,10 @@ typedef struct {
 static App *APP; /* single window — a global keeps GTask plumbing tidy */
 
 /* sidebar row kinds */
-enum { ROW_LIKED = 0, ROW_PLAYLIST = 1 };
+enum { ROW_LIKED = 0, ROW_PLAYLIST = 1, ROW_CHARTS = 2 };
 
 /* browse kinds */
-typedef enum { LOAD_FAVORITES, LOAD_PLAYLIST, LOAD_ALBUM, LOAD_SEARCH } LoadKind;
+typedef enum { LOAD_FAVORITES, LOAD_PLAYLIST, LOAD_ALBUM, LOAD_SEARCH, LOAD_CHARTS } LoadKind;
 
 /* forward declarations */
 static void play_index(App *a, int idx);
@@ -202,6 +209,14 @@ static gint64 jint(JsonObject *o, const char *key) {
   }
   return 0;
 }
+static gboolean jbool(JsonObject *o, const char *key) {
+  if (o && json_object_has_member(o, key)) {
+    JsonNode *n = json_object_get_member(o, key);
+    if (JSON_NODE_HOLDS_VALUE(n))
+      return json_node_get_boolean(n);
+  }
+  return FALSE;
+}
 
 static DzTrack *dz_track_from_json(JsonObject *o) {
   char *id = jstr(o, "id"), *name = jstr(o, "name"), *artist = jstr(o, "artistLine"),
@@ -279,6 +294,7 @@ static void load_worker(GTask *task, gpointer src, gpointer data, GCancellable *
     case LOAD_PLAYLIST:  j = DZPlaylistTracksJSON(ctx->arg); break;
     case LOAD_ALBUM:     j = DZAlbumTracksJSON(ctx->arg); break;
     case LOAD_SEARCH:    j = DZSearchJSON(ctx->arg); break;
+    case LOAD_CHARTS:    j = DZChartsJSON(); break;
   }
   char *dup = g_strdup(j ? j : "{}");
   if (j) DZFree(j);
@@ -366,6 +382,8 @@ static void on_sidebar_selected(GtkListBox *box, GtkListBoxRow *row, gpointer da
   adw_navigation_page_set_title(a->content_page, title ? title : "");
   if (kind == ROW_PLAYLIST)
     load_async(a, LOAD_PLAYLIST, id);
+  else if (kind == ROW_CHARTS)
+    load_async(a, LOAD_CHARTS, NULL);
   else
     load_async(a, LOAD_FAVORITES, NULL);
 }
@@ -491,6 +509,7 @@ static void settings_load(App *a) {
   /* sensible defaults: High quality, keep playing in background */
   a->quality = 1;
   a->background = TRUE;
+  a->replaygain = FALSE;
 
   GKeyFile *kf = g_key_file_new();
   char *path = settings_path();
@@ -502,6 +521,8 @@ static void settings_load(App *a) {
     }
     if (g_key_file_has_key(kf, "general", "background", NULL))
       a->background = g_key_file_get_boolean(kf, "general", "background", NULL);
+    if (g_key_file_has_key(kf, "audio", "replaygain", NULL))
+      a->replaygain = g_key_file_get_boolean(kf, "audio", "replaygain", NULL);
   }
   g_free(path);
   g_key_file_free(kf);
@@ -510,6 +531,7 @@ static void settings_load(App *a) {
 static void settings_save(App *a) {
   GKeyFile *kf = g_key_file_new();
   g_key_file_set_integer(kf, "audio", "quality_level", a->quality);
+  g_key_file_set_boolean(kf, "audio", "replaygain", a->replaygain);
   g_key_file_set_boolean(kf, "general", "background", a->background);
 
   char *path = settings_path();
@@ -538,6 +560,15 @@ static void on_background_toggled(GObject *row, GParamSpec *ps, gpointer data) {
   settings_save(a);
 }
 
+static void on_replaygain_toggled(GObject *row, GParamSpec *ps, gpointer data) {
+  (void)ps;
+  App *a = data;
+  a->replaygain = adw_switch_row_get_active(ADW_SWITCH_ROW(row));
+  DZSetReplayGain(a->replaygain ? 1 : 0);
+  settings_save(a);
+  toastf(a, "Loudness normalisation %s", a->replaygain ? "on" : "off");
+}
+
 static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
   (void)action; (void)param; (void)data;
   App *a = APP;
@@ -545,6 +576,24 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
   AdwPreferencesPage *page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
   adw_preferences_page_set_title(page, "Settings");
   adw_preferences_page_set_icon_name(page, "preferences-system-symbolic");
+
+  /* ---- Account (tier from DZAccountJSON, filled at login) ---- */
+  AdwPreferencesGroup *acct = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+  adw_preferences_group_set_title(acct, "Account");
+  GtkWidget *acct_row = adw_action_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(acct_row), "Signed in");
+  adw_action_row_add_prefix(ADW_ACTION_ROW(acct_row),
+                            gtk_image_new_from_icon_name("avatar-default-symbolic"));
+  if (a->acct_name && *a->acct_name) {
+    char *sub = g_strdup_printf("%s · %s", a->acct_name,
+                                (a->acct_offer && *a->acct_offer) ? a->acct_offer : "Deezer");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(acct_row), sub);
+    g_free(sub);
+  } else {
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(acct_row), "Not signed in");
+  }
+  adw_preferences_group_add(acct, acct_row);
+  adw_preferences_page_add(page, acct);
 
   /* ---- Audio ---- */
   AdwPreferencesGroup *audio = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
@@ -558,8 +607,22 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
   adw_combo_row_set_model(ADW_COMBO_ROW(quality),
                           G_LIST_MODEL(gtk_string_list_new(qlabels)));
   adw_combo_row_set_selected(ADW_COMBO_ROW(quality), (guint)a->quality);
+  /* if the chosen tier is above what the plan allows, explain it inline */
+  if (a->acct_name && *a->acct_name &&
+      ((a->quality >= 2 && !a->can_hifi) || (a->quality >= 1 && !a->can_hq)))
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(quality),
+                                "Above your plan — Deezer may stream a lower quality");
   g_signal_connect(quality, "notify::selected", G_CALLBACK(on_quality_selected), a);
   adw_preferences_group_add(audio, quality);
+
+  GtkWidget *rg = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(rg), "Loudness normalisation");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(rg),
+                              "Even out volume across tracks (ReplayGain)");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(rg), DZReplayGain() != 0);
+  g_signal_connect(rg, "notify::active", G_CALLBACK(on_replaygain_toggled), a);
+  adw_preferences_group_add(audio, rg);
+
   adw_preferences_page_add(page, audio);
 
   /* ---- Behaviour ---- */
@@ -1050,6 +1113,39 @@ static gboolean tick(gpointer data) {
  * login
  * ------------------------------------------------------------------------- */
 
+/* DZAccountJSON is a cheap cached read (no network), so it is safe to call on
+ * the main thread right after login. Stores tier + entitlements on APP. */
+static void load_account(App *a) {
+  g_clear_pointer(&a->acct_name, g_free);
+  g_clear_pointer(&a->acct_offer, g_free);
+  a->can_hq = a->can_hifi = FALSE;
+
+  char *j = DZAccountJSON();
+  if (!j) return;
+  JsonParser *p = json_parser_new();
+  if (json_parser_load_from_data(p, j, -1, NULL)) {
+    JsonNode *root = json_parser_get_root(p);
+    if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+      JsonObject *o = json_node_get_object(root);
+      if (jbool(o, "loggedIn")) {
+        a->acct_name = jstr(o, "name");
+        a->acct_offer = jstr(o, "offer");
+        a->can_hq = jbool(o, "canHq");
+        a->can_hifi = jbool(o, "canHifi");
+      }
+    }
+  }
+  g_object_unref(p);
+  DZFree(j);
+
+  if (a->acct_name && *a->acct_name) {
+    toastf(a, "%s · %s", a->acct_name,
+           (a->acct_offer && *a->acct_offer) ? a->acct_offer : "Deezer");
+    if ((a->quality >= 2 && !a->can_hifi) || (a->quality >= 1 && !a->can_hq))
+      toast(a, "Selected quality is above your plan — Deezer may stream lower");
+  }
+}
+
 static void init_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
   (void)src; (void)c;
   char *arl = data;
@@ -1058,8 +1154,11 @@ static void init_worker(GTask *task, gpointer src, gpointer data, GCancellable *
 static void init_done(GObject *src, GAsyncResult *res, gpointer data) {
   (void)src; (void)data;
   if (g_task_propagate_boolean(G_TASK(res), NULL)) {
-    toast(APP, "Connected to Deezer");
-    DZSetQuality(APP->quality); /* apply persisted quality once logged in */
+    DZSetQuality(APP->quality);                /* apply persisted quality once logged in */
+    DZSetReplayGain(APP->replaygain ? 1 : 0);  /* apply persisted ReplayGain */
+    load_account(APP);                         /* tier + entitlements (toasts name · offer) */
+    if (!(APP->acct_name && *APP->acct_name))
+      toast(APP, "Connected to Deezer");       /* fallback when account info is unavailable */
     load_playlists_async(APP);
     /* select Liked Songs (row 0) → triggers the favorites load */
     GtkListBoxRow *row = gtk_list_box_get_row_at_index(APP->sidebar, 0);
@@ -1075,7 +1174,13 @@ static void init_done(GObject *src, GAsyncResult *res, gpointer data) {
 
 static void on_about(GSimpleAction *action, GVariant *param, gpointer data) {
   (void)action; (void)param; (void)data;
-  const char *comments = "An open source reimplementation of Deezer.";
+  char *comments =
+      (APP->acct_name && *APP->acct_name)
+          ? g_strdup_printf("An open source reimplementation of Deezer.\n\n"
+                            "Signed in as %s · %s",
+                            APP->acct_name,
+                            (APP->acct_offer && *APP->acct_offer) ? APP->acct_offer : "Deezer")
+          : g_strdup("An open source reimplementation of Deezer.");
 #if ADW_CHECK_VERSION(1, 6, 0)
   AdwDialog *about = adw_about_dialog_new();
   adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(about), "OpenDeezer");
@@ -1101,6 +1206,7 @@ static void on_about(GSimpleAction *action, GVariant *param, gpointer data) {
   gtk_window_set_modal(GTK_WINDOW(about), TRUE);
   gtk_window_present(GTK_WINDOW(about));
 #endif
+  g_free(comments);
 }
 
 static void on_quit(GSimpleAction *action, GVariant *param, gpointer data) {
@@ -1233,9 +1339,11 @@ static GtkWidget *build_sidebar(App *a) {
   gtk_widget_add_css_class(GTK_WIDGET(a->sidebar), "navigation-sidebar");
   g_signal_connect(a->sidebar, "row-selected", G_CALLBACK(on_sidebar_selected), a);
 
-  /* static Liked Songs entry; playlists are appended after login */
+  /* static Liked Songs + Charts entries; playlists are appended after login */
   gtk_list_box_append(a->sidebar,
       make_side_row("Liked Songs", "Your favorites", "emblem-favorite-symbolic", ROW_LIKED, ""));
+  gtk_list_box_append(a->sidebar,
+      make_side_row("Charts", "Global top tracks", "view-sort-descending-symbolic", ROW_CHARTS, ""));
 
   GtkWidget *scroll = gtk_scrolled_window_new();
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(a->sidebar));
