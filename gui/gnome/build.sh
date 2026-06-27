@@ -5,6 +5,11 @@
 #   3. drop the binary next to this script as ./opendeezer-gnome
 #
 # Usage:  cd gui/gnome && ./build.sh && ./opendeezer-gnome
+#
+# Build deps (Debian/Ubuntu):
+#   golang gcc pkg-config meson ninja-build \
+#   libgtk-4-dev libadwaita-1-dev libjson-glib-dev libasound2-dev \
+#   libwebkitgtk-6.0-dev    # embedded Deezer login (pulls in libsoup-3.0-dev)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

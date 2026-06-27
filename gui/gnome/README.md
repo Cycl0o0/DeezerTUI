@@ -39,7 +39,8 @@ the app and the engine never drift.
 ```sh
 sudo apt install \
   golang gcc pkg-config meson ninja-build \
-  libgtk-4-dev libadwaita-1-dev libjson-glib-dev libasound2-dev
+  libgtk-4-dev libadwaita-1-dev libjson-glib-dev libasound2-dev \
+  libwebkitgtk-6.0-dev
 ```
 
 `libasound2-dev` is required at build/link time (the engine's `oto/v3` audio
@@ -47,11 +48,19 @@ backend hard-links ALSA via `#cgo pkg-config: alsa`); at runtime the host needs
 `libasound.so.2`. The Go core uses pure-Go crypto/HTTP, so **no** libssl/libcurl
 is needed.
 
+`libwebkitgtk-6.0-dev` provides the GTK4 WebKit port (`webkitgtk-6.0`) used by the
+embedded **Log in with Deezer** webview; it also pulls in `libsoup-3.0-dev`,
+whose `SoupCookie` API reads the `arl` cookie back out of the WebView.
+
 ### ARL / login
 
-The ARL is read from `$DEEZER_ARL`, falling back to
-`~/.config/opendeezer/arl.txt` (same as the TUI). Without one, the app shows a
-toast and stays on an empty library.
+On first launch (no stored ARL) the app opens a **Log in to Deezer** window with
+a **Log in with Deezer** button that embeds the real Deezer web login
+(WebKitGTK). After you sign in, the `arl` cookie is captured automatically, used
+to start the session, and written to `~/.config/opendeezer/arl.txt` so the next
+launch auto-logs-in — no manual ARL needed. A manual-ARL paste box stays on the
+same screen as a fallback. The ARL is still read from `$DEEZER_ARL` first, then
+`~/.config/opendeezer/arl.txt`, at startup.
 
 ## Files
 
