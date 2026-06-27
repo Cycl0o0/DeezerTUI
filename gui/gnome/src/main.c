@@ -38,9 +38,10 @@ struct _DzTrack {
   GObject parent_instance;
   char   *id;
   char   *name;
-  char   *artist;  /* artistLine */
-  char   *album;   /* albumName  */
-  char   *artwork; /* artworkUrl */
+  char   *artist;    /* artistLine */
+  char   *artist_id; /* artists[0].id — the id used to open the artist view */
+  char   *album;     /* albumName  */
+  char   *artwork;   /* artworkUrl */
   gint64  duration_ms;
 };
 
@@ -51,6 +52,7 @@ static void dz_track_finalize(GObject *o) {
   g_free(t->id);
   g_free(t->name);
   g_free(t->artist);
+  g_free(t->artist_id);
   g_free(t->album);
   g_free(t->artwork);
   G_OBJECT_CLASS(dz_track_parent_class)->finalize(o);
@@ -59,11 +61,13 @@ static void dz_track_class_init(DzTrackClass *k) { G_OBJECT_CLASS(k)->finalize =
 static void dz_track_init(DzTrack *t) { (void)t; }
 
 static DzTrack *dz_track_new(const char *id, const char *name, const char *artist,
-                             const char *album, const char *artwork, gint64 dur) {
+                             const char *album, const char *artwork, gint64 dur,
+                             const char *artist_id) {
   DzTrack *t = g_object_new(DZ_TYPE_TRACK, NULL);
   t->id = g_strdup(id ? id : "");
   t->name = g_strdup(name ? name : "");
   t->artist = g_strdup(artist ? artist : "");
+  t->artist_id = g_strdup(artist_id ? artist_id : "");
   t->album = g_strdup(album ? album : "");
   t->artwork = g_strdup(artwork ? artwork : "");
   t->duration_ms = dur;
@@ -119,6 +123,29 @@ typedef struct {
   char                 *mpris_status;  /* last published PlaybackStatus */
 
   gboolean              held;          /* g_application_hold is active */
+
+  /* ---- lyrics view (an AdwDialog; synced highlight driven by the 300ms tick) ---- */
+  AdwDialog            *lyrics_dialog;   /* non-NULL while open */
+  GtkWidget            *lyrics_scroll;   /* scrolled window (for auto-scroll) */
+  GtkWidget            *lyrics_box;      /* vertical box holding the line labels */
+  GtkWidget            *lyrics_titlew;   /* AdwWindowTitle in the header */
+  GPtrArray            *lyrics_lines;    /* borrowed GtkWidget* per synced line */
+  GArray               *lyrics_times;    /* gint64 timeMs per synced line */
+  gboolean              lyrics_synced;   /* synced highlight active */
+  int                   lyrics_active;   /* highlighted line index, -1 none */
+  char                 *lyrics_track_id; /* id of the displayed lyrics */
+  char                 *lyrics_req_id;   /* id last requested (refetch guard) */
+  GHashTable           *lyrics_cache;    /* id(str) -> json(str), owned */
+  guint                 lyrics_gen;      /* drops stale async lyrics fetches */
+
+  /* ---- artist view (an AdwDialog whose content is rebuilt per artist) ---- */
+  AdwDialog            *artist_dialog;   /* non-NULL while open */
+  GtkWidget            *artist_content;  /* box rebuilt for each artist */
+  GtkWidget            *artist_titlew;   /* AdwWindowTitle in the header */
+  char                 *artist_req_id;   /* id last requested */
+  char                 *artist_name;     /* current artist display name */
+  GPtrArray            *artist_top;      /* DzTrack* owned — the play queue source */
+  guint                 artist_gen;      /* drops stale async artist/image fetches */
 } App;
 
 static App *APP; /* single window — a global keeps GTask plumbing tidy */
@@ -150,6 +177,12 @@ static void mpris_setup(App *a);
 
 /* background window helpers */
 static void show_window(App *a);
+
+/* lyrics + artist detail views (defined after the playback/MPRIS sections) */
+static void open_lyrics(App *a);
+static void open_artist(App *a, const char *artist_id);
+static void lyrics_load(App *a, const char *track_id);
+static void lyrics_highlight(App *a);
 
 /* ---------------------------------------------------------------------------
  * small helpers
@@ -221,8 +254,20 @@ static gboolean jbool(JsonObject *o, const char *key) {
 static DzTrack *dz_track_from_json(JsonObject *o) {
   char *id = jstr(o, "id"), *name = jstr(o, "name"), *artist = jstr(o, "artistLine"),
        *album = jstr(o, "albumName"), *art = jstr(o, "artworkUrl");
-  DzTrack *t = dz_track_new(id, name, artist, album, art, jint(o, "durationMs"));
-  g_free(id); g_free(name); g_free(artist); g_free(album); g_free(art);
+  /* keep the first artist id so the track can open the artist view */
+  char *aid = g_strdup("");
+  if (o && json_object_has_member(o, "artists")) {
+    JsonNode *n = json_object_get_member(o, "artists");
+    if (JSON_NODE_HOLDS_ARRAY(n)) {
+      JsonArray *arr = json_node_get_array(n);
+      if (json_array_get_length(arr) > 0) {
+        g_free(aid);
+        aid = jstr(json_array_get_object_element(arr, 0), "id");
+      }
+    }
+  }
+  DzTrack *t = dz_track_new(id, name, artist, album, art, jint(o, "durationMs"), aid);
+  g_free(id); g_free(name); g_free(artist); g_free(album); g_free(art); g_free(aid);
   return t;
 }
 
@@ -964,17 +1009,14 @@ static gboolean on_window_close(GtkWindow *win, gpointer data) {
  * async cover art: DZFetch on a worker, decode to a GdkTexture, set on main
  * ------------------------------------------------------------------------- */
 
-typedef struct { char *url; guint gen; } CoverCtx;
-static void cover_ctx_free(gpointer p) { CoverCtx *c = p; g_free(c->url); g_free(c); }
-
-static void cover_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
-  (void)src; (void)c;
-  CoverCtx *ctx = data;
+/* Fetch + decode a remote image to a GdkTexture (off the main thread).
+ * GdkPixbufLoader sniffs JPEG/PNG and is safe to run on a worker. NULL on error. */
+static GdkTexture *fetch_texture(const char *url) {
+  if (!url || !*url) return NULL;
   int len = 0;
-  unsigned char *buf = DZFetch(ctx->url, &len);
+  unsigned char *buf = DZFetch((char *)url, &len);
   GdkTexture *tex = NULL;
   if (buf && len > 0) {
-    /* GdkPixbufLoader sniffs JPEG/PNG and is safe to run off the main thread. */
     GdkPixbufLoader *loader = gdk_pixbuf_loader_new();
     if (gdk_pixbuf_loader_write(loader, buf, len, NULL) &&
         gdk_pixbuf_loader_close(loader, NULL)) {
@@ -988,7 +1030,53 @@ static void cover_worker(GTask *task, gpointer src, gpointer data, GCancellable 
     g_object_unref(loader);
   }
   if (buf) DZFreeBytes(buf);
-  g_task_return_pointer(task, tex, g_object_unref);
+  return tex;
+}
+
+typedef struct { char *url; guint gen; } CoverCtx;
+static void cover_ctx_free(gpointer p) { CoverCtx *c = p; g_free(c->url); g_free(c); }
+
+static void cover_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
+  (void)src; (void)c;
+  CoverCtx *ctx = data;
+  g_task_return_pointer(task, fetch_texture(ctx->url), g_object_unref);
+}
+
+/* ---- generic async artwork loader for an arbitrary GtkPicture ----
+ * Used by the artist view (header/album/related thumbnails). The fetch is
+ * gated on a generation counter so results landing after the view was rebuilt
+ * are dropped; a ref on the GtkPicture keeps it alive until the fetch ends. */
+typedef struct { char *url; GtkPicture *pic; guint *genp; guint gen; } ImgCtx;
+static void img_ctx_free(gpointer p) {
+  ImgCtx *c = p;
+  g_free(c->url);
+  g_object_unref(c->pic);
+  g_free(c);
+}
+static void img_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
+  (void)src; (void)c;
+  ImgCtx *ctx = data;
+  g_task_return_pointer(task, fetch_texture(ctx->url), g_object_unref);
+}
+static void img_done(GObject *src, GAsyncResult *res, gpointer data) {
+  (void)src; (void)data;
+  ImgCtx *ctx = g_task_get_task_data(G_TASK(res));
+  GdkTexture *tex = g_task_propagate_pointer(G_TASK(res), NULL);
+  if (tex && *ctx->genp == ctx->gen)
+    gtk_picture_set_paintable(ctx->pic, GDK_PAINTABLE(tex));
+  if (tex) g_object_unref(tex);
+}
+static void fetch_picture(GtkPicture *pic, const char *url, guint *genp, guint gen) {
+  if (!pic || !url || !*url) return;
+  ImgCtx *c = g_new0(ImgCtx, 1);
+  c->url = g_strdup(url);
+  c->pic = g_object_ref(pic);
+  c->genp = genp;
+  c->gen = gen;
+  GTask *t = g_task_new(NULL, NULL, img_done, NULL);
+  g_task_set_task_data(t, c, img_ctx_free);
+  g_task_run_in_thread(t, img_worker);
+  g_object_unref(t);
 }
 
 static void cover_done(GObject *src, GAsyncResult *res, gpointer data) {
@@ -1056,6 +1144,580 @@ static void on_search_activate(GtkSearchEntry *entry, gpointer data) {
 }
 
 /* ---------------------------------------------------------------------------
+ * lyrics + artist detail views
+ *
+ * Both are AdwDialogs (consistent with Settings/About). Network reads run on a
+ * GTask worker exactly like the browse/cover paths; results are marshalled back
+ * and rendered on the main loop. The lyrics view's synced highlight is advanced
+ * by the existing 300 ms tick (same loop that moves the scrubber).
+ * ------------------------------------------------------------------------- */
+
+static void box_clear(GtkWidget *box) {
+  GtkWidget *child;
+  while ((child = gtk_widget_get_first_child(box)))
+    gtk_box_remove(GTK_BOX(box), child);
+}
+
+/* ============================ LYRICS ============================ */
+
+static void lyrics_set_status(App *a, const char *msg) {
+  if (!a->lyrics_box) return;
+  box_clear(a->lyrics_box);
+  if (a->lyrics_lines) g_ptr_array_set_size(a->lyrics_lines, 0);
+  if (a->lyrics_times) g_array_set_size(a->lyrics_times, 0);
+  a->lyrics_synced = FALSE;
+  a->lyrics_active = -1;
+  GtkWidget *l = gtk_label_new(msg);
+  gtk_widget_add_css_class(l, "dim-label");
+  gtk_widget_set_vexpand(l, TRUE);
+  gtk_widget_set_valign(l, GTK_ALIGN_CENTER);
+  gtk_label_set_wrap(GTK_LABEL(l), TRUE);
+  gtk_label_set_justify(GTK_LABEL(l), GTK_JUSTIFY_CENTER);
+  gtk_box_append(GTK_BOX(a->lyrics_box), l);
+}
+
+/* render a lyrics JSON payload into the dialog body */
+static void lyrics_apply(App *a, const char *track_id, const char *json) {
+  if (!a->lyrics_box) return;
+  box_clear(a->lyrics_box);
+  if (a->lyrics_lines) g_ptr_array_set_size(a->lyrics_lines, 0);
+  if (a->lyrics_times) g_array_set_size(a->lyrics_times, 0);
+  a->lyrics_synced = FALSE;
+  a->lyrics_active = -1;
+  g_free(a->lyrics_track_id);
+  a->lyrics_track_id = g_strdup(track_id ? track_id : "");
+
+  if (!json) { lyrics_set_status(a, "No lyrics available"); return; }
+
+  JsonParser *p = json_parser_new();
+  if (!json_parser_load_from_data(p, json, -1, NULL)) {
+    g_object_unref(p);
+    lyrics_set_status(a, "Couldn't load lyrics");
+    return;
+  }
+  JsonNode *root = json_parser_get_root(p);
+  JsonObject *o = (root && JSON_NODE_HOLDS_OBJECT(root)) ? json_node_get_object(root) : NULL;
+  if (!o || json_object_has_member(o, "error")) {
+    g_object_unref(p);
+    lyrics_set_status(a, "No lyrics available");
+    return;
+  }
+
+  gboolean synced = jbool(o, "isSynced");
+  JsonArray *arr = (synced && json_object_has_member(o, "synced"))
+                       ? json_object_get_array_member(o, "synced") : NULL;
+  guint n = arr ? json_array_get_length(arr) : 0;
+
+  if (synced && n > 0) {
+    a->lyrics_synced = TRUE;
+    for (guint i = 0; i < n; i++) {
+      JsonObject *line = json_array_get_object_element(arr, i);
+      gint64 t = jint(line, "timeMs");
+      char *txt = jstr(line, "text");
+      GtkWidget *lab = gtk_label_new((txt && *txt) ? txt : " ");
+      gtk_label_set_wrap(GTK_LABEL(lab), TRUE);
+      gtk_label_set_justify(GTK_LABEL(lab), GTK_JUSTIFY_CENTER);
+      gtk_label_set_xalign(GTK_LABEL(lab), 0.5);
+      gtk_widget_add_css_class(lab, "lyrics-line");
+      gtk_box_append(GTK_BOX(a->lyrics_box), lab);
+      g_ptr_array_add(a->lyrics_lines, lab);   /* borrowed pointer */
+      g_array_append_val(a->lyrics_times, t);
+      g_free(txt);
+    }
+    g_object_unref(p);
+    return;
+  }
+
+  /* unsynced: plain text (or "no lyrics") */
+  char *plain = jstr(o, "plain");
+  if (plain && *plain) {
+    GtkWidget *lab = gtk_label_new(plain);
+    gtk_label_set_wrap(GTK_LABEL(lab), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(lab), 0.0);
+    gtk_label_set_selectable(GTK_LABEL(lab), TRUE);
+    gtk_widget_add_css_class(lab, "lyrics-plain");
+    gtk_box_append(GTK_BOX(a->lyrics_box), lab);
+  } else {
+    lyrics_set_status(a, "No lyrics available");
+  }
+  g_free(plain);
+  g_object_unref(p);
+}
+
+typedef struct { char *id; guint gen; } LyricsCtx;
+static void lyrics_ctx_free(gpointer p) { LyricsCtx *c = p; g_free(c->id); g_free(c); }
+
+static void lyrics_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
+  (void)src; (void)c;
+  LyricsCtx *ctx = data;
+  char *j = DZLyricsJSON(ctx->id);
+  char *dup = g_strdup(j ? j : "");
+  if (j) DZFree(j);
+  g_task_return_pointer(task, dup, g_free);
+}
+
+static void lyrics_done(GObject *src, GAsyncResult *res, gpointer data) {
+  (void)src; (void)data;
+  LyricsCtx *ctx = g_task_get_task_data(G_TASK(res));
+  char *json = g_task_propagate_pointer(G_TASK(res), NULL);
+  if (json && *json)
+    g_hash_table_replace(APP->lyrics_cache, g_strdup(ctx->id), g_strdup(json));
+  if (APP->lyrics_dialog && ctx->gen == APP->lyrics_gen)
+    lyrics_apply(APP, ctx->id, (json && *json) ? json : NULL);
+  g_free(json);
+}
+
+/* fetch (or use the cached) lyrics for track_id and render them */
+static void lyrics_load(App *a, const char *track_id) {
+  g_free(a->lyrics_req_id);
+  a->lyrics_req_id = g_strdup(track_id ? track_id : "");
+  a->lyrics_gen++; /* invalidate any in-flight fetch */
+  if (!track_id || !*track_id) { lyrics_set_status(a, "Play a track to see its lyrics"); return; }
+
+  const char *cached = a->lyrics_cache ? g_hash_table_lookup(a->lyrics_cache, track_id) : NULL;
+  if (cached) { lyrics_apply(a, track_id, cached); return; }
+
+  lyrics_set_status(a, "Loading lyrics…");
+  LyricsCtx *c = g_new0(LyricsCtx, 1);
+  c->id = g_strdup(track_id);
+  c->gen = a->lyrics_gen;
+  GTask *t = g_task_new(NULL, NULL, lyrics_done, NULL);
+  g_task_set_task_data(t, c, lyrics_ctx_free);
+  g_task_run_in_thread(t, lyrics_worker);
+  g_object_unref(t);
+}
+
+/* advance the highlighted synced line to match the playback position and keep
+ * it centred. Called every tick while the dialog is open. */
+static void lyrics_highlight(App *a) {
+  if (!a->lyrics_dialog || !a->lyrics_synced || !a->lyrics_lines || !a->lyrics_times) return;
+  guint n = a->lyrics_times->len;
+  if (n == 0) return;
+  gint64 pos = DZPositionMS();
+  int active = -1;
+  for (guint i = 0; i < n; i++) {
+    if (g_array_index(a->lyrics_times, gint64, i) <= pos) active = (int)i;
+    else break;
+  }
+  if (active == a->lyrics_active) return;
+  if (a->lyrics_active >= 0 && (guint)a->lyrics_active < a->lyrics_lines->len)
+    gtk_widget_remove_css_class(GTK_WIDGET(g_ptr_array_index(a->lyrics_lines, a->lyrics_active)),
+                                "lyrics-active");
+  a->lyrics_active = active;
+  if (active < 0) return;
+  GtkWidget *lab = GTK_WIDGET(g_ptr_array_index(a->lyrics_lines, active));
+  gtk_widget_add_css_class(lab, "lyrics-active");
+
+  /* centre the active line in the viewport */
+  if (a->lyrics_scroll) {
+    graphene_rect_t b;
+    if (gtk_widget_compute_bounds(lab, a->lyrics_box, &b)) {
+      GtkAdjustment *adj =
+          gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(a->lyrics_scroll));
+      double page = gtk_adjustment_get_page_size(adj);
+      double target = b.origin.y + b.size.height / 2.0 - page / 2.0;
+      double maxv = gtk_adjustment_get_upper(adj) - page;
+      if (target < 0) target = 0;
+      if (target > maxv) target = maxv;
+      gtk_adjustment_set_value(adj, target);
+    }
+  }
+}
+
+static void on_lyrics_closed(AdwDialog *d, gpointer data) {
+  (void)d;
+  App *a = data;
+  a->lyrics_dialog = NULL;
+  a->lyrics_scroll = NULL;
+  a->lyrics_box = NULL;
+  a->lyrics_titlew = NULL;
+  if (a->lyrics_lines) { g_ptr_array_free(a->lyrics_lines, TRUE); a->lyrics_lines = NULL; }
+  if (a->lyrics_times) { g_array_free(a->lyrics_times, TRUE); a->lyrics_times = NULL; }
+  a->lyrics_synced = FALSE;
+  a->lyrics_active = -1;
+  g_clear_pointer(&a->lyrics_track_id, g_free);
+  g_clear_pointer(&a->lyrics_req_id, g_free);
+}
+
+static void open_lyrics(App *a) {
+  if (a->lyrics_dialog) { adw_dialog_present(a->lyrics_dialog, GTK_WIDGET(a->win)); return; }
+  if (!a->lyrics_cache)
+    a->lyrics_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+  a->lyrics_lines = g_ptr_array_new();
+  a->lyrics_times = g_array_new(FALSE, FALSE, sizeof(gint64));
+  a->lyrics_active = -1;
+
+  AdwToolbarView *tv = ADW_TOOLBAR_VIEW(adw_toolbar_view_new());
+  GtkWidget *hb = adw_header_bar_new();
+  a->lyrics_titlew = adw_window_title_new("Lyrics", NULL);
+  adw_header_bar_set_title_widget(ADW_HEADER_BAR(hb), a->lyrics_titlew);
+  adw_toolbar_view_add_top_bar(tv, hb);
+
+  a->lyrics_scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(a->lyrics_scroll),
+                                 GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_widget_set_vexpand(a->lyrics_scroll, TRUE);
+  a->lyrics_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  gtk_widget_set_margin_top(a->lyrics_box, 16);
+  gtk_widget_set_margin_bottom(a->lyrics_box, 200); /* slack so the last lines can centre */
+  gtk_widget_set_margin_start(a->lyrics_box, 16);
+  gtk_widget_set_margin_end(a->lyrics_box, 16);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(a->lyrics_scroll), a->lyrics_box);
+  adw_toolbar_view_set_content(tv, a->lyrics_scroll);
+
+  a->lyrics_dialog = ADW_DIALOG(adw_dialog_new());
+  adw_dialog_set_title(a->lyrics_dialog, "Lyrics");
+  adw_dialog_set_content_width(a->lyrics_dialog, 520);
+  adw_dialog_set_content_height(a->lyrics_dialog, 640);
+  adw_dialog_set_child(a->lyrics_dialog, GTK_WIDGET(tv));
+  g_signal_connect(a->lyrics_dialog, "closed", G_CALLBACK(on_lyrics_closed), a);
+
+  /* load the current track's lyrics right away */
+  DzTrack *ct = mpris_current_track(a);
+  if (ct) {
+    adw_window_title_set_subtitle(ADW_WINDOW_TITLE(a->lyrics_titlew), ct->name);
+    lyrics_load(a, ct->id);
+    g_object_unref(ct);
+  } else {
+    lyrics_load(a, "");
+  }
+  adw_dialog_present(a->lyrics_dialog, GTK_WIDGET(a->win));
+}
+
+/* ============================ ARTIST ============================ */
+
+static GtkWidget *thumb_new(int size, gboolean circular) {
+  GtkPicture *p = GTK_PICTURE(gtk_picture_new());
+  gtk_widget_set_size_request(GTK_WIDGET(p), size, size);
+  gtk_picture_set_content_fit(p, GTK_CONTENT_FIT_COVER);
+  gtk_widget_set_valign(GTK_WIDGET(p), GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class(GTK_WIDGET(p), circular ? "dz-avatar" : "np-cover");
+  return GTK_WIDGET(p);
+}
+
+static GtkWidget *section_title(const char *txt) {
+  GtkWidget *l = gtk_label_new(txt);
+  gtk_label_set_xalign(GTK_LABEL(l), 0.0);
+  gtk_widget_add_css_class(l, "title-4");
+  gtk_widget_set_margin_top(l, 12);
+  gtk_widget_set_margin_start(l, 4);
+  return l;
+}
+
+static GtkWidget *artist_listbox(GCallback activated, App *a) {
+  GtkWidget *lb = gtk_list_box_new();
+  gtk_list_box_set_selection_mode(GTK_LIST_BOX(lb), GTK_SELECTION_NONE);
+  gtk_widget_add_css_class(lb, "boxed-list");
+  g_signal_connect(lb, "row-activated", activated, a);
+  return lb;
+}
+
+static void artist_set_status(App *a, const char *msg) {
+  if (!a->artist_content) return;
+  box_clear(a->artist_content);
+  GtkWidget *l = gtk_label_new(msg);
+  gtk_widget_add_css_class(l, "dim-label");
+  gtk_widget_set_vexpand(l, TRUE);
+  gtk_widget_set_valign(l, GTK_ALIGN_CENTER);
+  gtk_box_append(GTK_BOX(a->artist_content), l);
+}
+
+/* Top track row clicked: load the artist's top tracks as the play queue and
+ * start the chosen one via the existing play path. */
+static void on_artist_top_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
+  (void)box;
+  App *a = data;
+  if (!row || !a->artist_top) return;
+  int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "idx"));
+  if (idx < 0 || (guint)idx >= a->artist_top->len) return;
+  g_list_store_remove_all(a->track_store);
+  for (guint i = 0; i < a->artist_top->len; i++)
+    g_list_store_append(a->track_store, g_ptr_array_index(a->artist_top, i));
+  a->current_index = -1;
+  if (a->artist_name && *a->artist_name)
+    adw_navigation_page_set_title(a->content_page, a->artist_name);
+  play_index(a, idx);
+  if (a->artist_dialog) adw_dialog_close(a->artist_dialog);
+}
+
+/* Album row clicked: open it through the existing album-tracks browse path. */
+static void on_artist_album_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
+  (void)box;
+  App *a = data;
+  if (!row) return;
+  const char *id = g_object_get_data(G_OBJECT(row), "album_id");
+  const char *name = g_object_get_data(G_OBJECT(row), "album_name");
+  if (!id || !*id) return;
+  adw_navigation_page_set_title(a->content_page, (name && *name) ? name : "Album");
+  load_async(a, LOAD_ALBUM, id);
+  if (a->artist_dialog) adw_dialog_close(a->artist_dialog);
+}
+
+/* Related artist row clicked: re-point this same dialog at that artist. */
+static void on_artist_related_activated(GtkListBox *box, GtkListBoxRow *row, gpointer data) {
+  (void)box;
+  App *a = data;
+  if (!row) return;
+  const char *id = g_object_get_data(G_OBJECT(row), "artist_id");
+  if (id && *id) open_artist(a, id);
+}
+
+/* render an artist-profile JSON payload into the dialog body */
+static void artist_apply(App *a, const char *artist_id, const char *json) {
+  (void)artist_id;
+  if (!a->artist_content) return;
+  box_clear(a->artist_content);
+  if (a->artist_top) g_ptr_array_set_size(a->artist_top, 0);
+  g_clear_pointer(&a->artist_name, g_free);
+
+  if (!json) { artist_set_status(a, "Couldn't load this artist"); return; }
+  JsonParser *p = json_parser_new();
+  if (!json_parser_load_from_data(p, json, -1, NULL)) {
+    g_object_unref(p); artist_set_status(a, "Couldn't load this artist"); return;
+  }
+  JsonNode *root = json_parser_get_root(p);
+  JsonObject *o = (root && JSON_NODE_HOLDS_OBJECT(root)) ? json_node_get_object(root) : NULL;
+  if (!o || json_object_has_member(o, "error")) {
+    g_object_unref(p); artist_set_status(a, "Couldn't load this artist"); return;
+  }
+
+  guint gen = a->artist_gen;
+
+  /* ---- header: round artwork + name + fan count ---- */
+  JsonObject *info =
+      json_object_has_member(o, "artist") ? json_object_get_object_member(o, "artist") : NULL;
+  char *name = info ? jstr(info, "name") : g_strdup("");
+  char *art  = info ? jstr(info, "artworkUrl") : g_strdup("");
+  gint64 fans = info ? jint(info, "nbFans") : 0;
+  a->artist_name = g_strdup(name);
+  if (a->artist_titlew)
+    adw_window_title_set_subtitle(ADW_WINDOW_TITLE(a->artist_titlew), name);
+
+  GtkWidget *hdr = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+  GtkWidget *pic = thumb_new(112, TRUE);
+  fetch_picture(GTK_PICTURE(pic), art, &a->artist_gen, gen);
+  gtk_box_append(GTK_BOX(hdr), pic);
+  GtkWidget *htext = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_set_valign(htext, GTK_ALIGN_CENTER);
+  GtkWidget *nl = gtk_label_new(name);
+  gtk_label_set_xalign(GTK_LABEL(nl), 0.0);
+  gtk_label_set_wrap(GTK_LABEL(nl), TRUE);
+  gtk_widget_add_css_class(nl, "title-1");
+  gtk_box_append(GTK_BOX(htext), nl);
+  if (fans > 0) {
+    char *fl = g_strdup_printf("%lld fans", (long long)fans);
+    GtkWidget *fw = gtk_label_new(fl);
+    gtk_label_set_xalign(GTK_LABEL(fw), 0.0);
+    gtk_widget_add_css_class(fw, "dim-label");
+    gtk_box_append(GTK_BOX(htext), fw);
+    g_free(fl);
+  }
+  gtk_box_append(GTK_BOX(hdr), htext);
+  gtk_box_append(GTK_BOX(a->artist_content), hdr);
+
+  /* ---- Top Tracks (playable) ---- */
+  JsonArray *top =
+      json_object_has_member(o, "top") ? json_object_get_array_member(o, "top") : NULL;
+  guint tn = top ? json_array_get_length(top) : 0;
+  if (tn > 0) {
+    gtk_box_append(GTK_BOX(a->artist_content), section_title("Top Tracks"));
+    GtkWidget *lb = artist_listbox(G_CALLBACK(on_artist_top_activated), a);
+    for (guint i = 0; i < tn; i++) {
+      DzTrack *t = dz_track_from_json(json_array_get_object_element(top, i));
+      g_ptr_array_add(a->artist_top, t); /* takes the owning ref */
+      GtkWidget *row = adw_action_row_new();
+      gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
+      adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
+      adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), t->name);
+      if (t->album && *t->album)
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), t->album);
+      char *dt = ms_to_text(t->duration_ms);
+      GtkWidget *dl = gtk_label_new(dt);
+      gtk_widget_add_css_class(dl, "dim-label");
+      gtk_widget_add_css_class(dl, "numeric");
+      adw_action_row_add_suffix(ADW_ACTION_ROW(row), dl);
+      g_free(dt);
+      g_object_set_data(G_OBJECT(row), "idx", GINT_TO_POINTER((int)i));
+      gtk_list_box_append(GTK_LIST_BOX(lb), row);
+    }
+    gtk_box_append(GTK_BOX(a->artist_content), lb);
+  }
+
+  /* ---- Albums ---- */
+  JsonArray *albums =
+      json_object_has_member(o, "albums") ? json_object_get_array_member(o, "albums") : NULL;
+  guint an = albums ? json_array_get_length(albums) : 0;
+  if (an > 0) {
+    gtk_box_append(GTK_BOX(a->artist_content), section_title("Albums"));
+    GtkWidget *lb = artist_listbox(G_CALLBACK(on_artist_album_activated), a);
+    for (guint i = 0; i < an; i++) {
+      JsonObject *ao = json_array_get_object_element(albums, i);
+      char *aid = jstr(ao, "id"), *aname = jstr(ao, "name"), *aart = jstr(ao, "artworkUrl");
+      char *aartist = g_strdup("");
+      if (json_object_has_member(ao, "artists")) {
+        JsonNode *nn = json_object_get_member(ao, "artists");
+        if (JSON_NODE_HOLDS_ARRAY(nn)) {
+          JsonArray *aa = json_node_get_array(nn);
+          if (json_array_get_length(aa) > 0) {
+            g_free(aartist);
+            aartist = jstr(json_array_get_object_element(aa, 0), "name");
+          }
+        }
+      }
+      GtkWidget *row = adw_action_row_new();
+      gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
+      adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
+      adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), aname);
+      if (*aartist) adw_action_row_set_subtitle(ADW_ACTION_ROW(row), aartist);
+      GtkWidget *cov = thumb_new(44, FALSE);
+      fetch_picture(GTK_PICTURE(cov), aart, &a->artist_gen, gen);
+      adw_action_row_add_prefix(ADW_ACTION_ROW(row), cov);
+      GtkWidget *chev = gtk_image_new_from_icon_name("go-next-symbolic");
+      gtk_widget_add_css_class(chev, "dim-label");
+      adw_action_row_add_suffix(ADW_ACTION_ROW(row), chev);
+      g_object_set_data_full(G_OBJECT(row), "album_id", g_strdup(aid), g_free);
+      g_object_set_data_full(G_OBJECT(row), "album_name", g_strdup(aname), g_free);
+      gtk_list_box_append(GTK_LIST_BOX(lb), row);
+      g_free(aid); g_free(aname); g_free(aart); g_free(aartist);
+    }
+    gtk_box_append(GTK_BOX(a->artist_content), lb);
+  }
+
+  /* ---- Related Artists ---- */
+  JsonArray *rel =
+      json_object_has_member(o, "related") ? json_object_get_array_member(o, "related") : NULL;
+  guint rn = rel ? json_array_get_length(rel) : 0;
+  if (rn > 0) {
+    gtk_box_append(GTK_BOX(a->artist_content), section_title("Related Artists"));
+    GtkWidget *lb = artist_listbox(G_CALLBACK(on_artist_related_activated), a);
+    for (guint i = 0; i < rn; i++) {
+      JsonObject *ro = json_array_get_object_element(rel, i);
+      char *rid = jstr(ro, "id"), *rname = jstr(ro, "name"), *rart = jstr(ro, "artworkUrl");
+      gint64 rfans = jint(ro, "nbFans");
+      GtkWidget *row = adw_action_row_new();
+      gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
+      adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
+      adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), rname);
+      if (rfans > 0) {
+        char *s = g_strdup_printf("%lld fans", (long long)rfans);
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), s);
+        g_free(s);
+      }
+      GtkWidget *av = thumb_new(44, TRUE);
+      fetch_picture(GTK_PICTURE(av), rart, &a->artist_gen, gen);
+      adw_action_row_add_prefix(ADW_ACTION_ROW(row), av);
+      GtkWidget *chev = gtk_image_new_from_icon_name("go-next-symbolic");
+      gtk_widget_add_css_class(chev, "dim-label");
+      adw_action_row_add_suffix(ADW_ACTION_ROW(row), chev);
+      g_object_set_data_full(G_OBJECT(row), "artist_id", g_strdup(rid), g_free);
+      gtk_list_box_append(GTK_LIST_BOX(lb), row);
+      g_free(rid); g_free(rname); g_free(rart);
+    }
+    gtk_box_append(GTK_BOX(a->artist_content), lb);
+  }
+
+  g_free(name); g_free(art);
+  g_object_unref(p);
+}
+
+typedef struct { char *id; guint gen; } ArtistCtx;
+static void artist_ctx_free(gpointer p) { ArtistCtx *c = p; g_free(c->id); g_free(c); }
+
+static void artist_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
+  (void)src; (void)c;
+  ArtistCtx *ctx = data;
+  char *j = DZArtistProfileJSON(ctx->id);
+  char *dup = g_strdup(j ? j : "");
+  if (j) DZFree(j);
+  g_task_return_pointer(task, dup, g_free);
+}
+
+static void artist_done(GObject *src, GAsyncResult *res, gpointer data) {
+  (void)src; (void)data;
+  ArtistCtx *ctx = g_task_get_task_data(G_TASK(res));
+  char *json = g_task_propagate_pointer(G_TASK(res), NULL);
+  if (APP->artist_dialog && ctx->gen == APP->artist_gen)
+    artist_apply(APP, ctx->id, (json && *json) ? json : NULL);
+  g_free(json);
+}
+
+static void on_artist_closed(AdwDialog *d, gpointer data) {
+  (void)d;
+  App *a = data;
+  a->artist_dialog = NULL;
+  a->artist_content = NULL;
+  a->artist_titlew = NULL;
+  if (a->artist_top) { g_ptr_array_free(a->artist_top, TRUE); a->artist_top = NULL; }
+  g_clear_pointer(&a->artist_name, g_free);
+  g_clear_pointer(&a->artist_req_id, g_free);
+  a->artist_gen++; /* drop any in-flight profile/image fetches */
+}
+
+static void open_artist(App *a, const char *artist_id) {
+  if (!artist_id || !*artist_id) { toast(a, "No artist for this track"); return; }
+
+  if (!a->artist_dialog) {
+    a->artist_top = g_ptr_array_new_with_free_func(g_object_unref);
+
+    AdwToolbarView *tv = ADW_TOOLBAR_VIEW(adw_toolbar_view_new());
+    GtkWidget *hb = adw_header_bar_new();
+    a->artist_titlew = adw_window_title_new("Artist", NULL);
+    adw_header_bar_set_title_widget(ADW_HEADER_BAR(hb), a->artist_titlew);
+    adw_toolbar_view_add_top_bar(tv, hb);
+
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_vexpand(scroll, TRUE);
+    a->artist_content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_top(a->artist_content, 16);
+    gtk_widget_set_margin_bottom(a->artist_content, 24);
+    gtk_widget_set_margin_start(a->artist_content, 16);
+    gtk_widget_set_margin_end(a->artist_content, 16);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), a->artist_content);
+    adw_toolbar_view_set_content(tv, scroll);
+
+    a->artist_dialog = ADW_DIALOG(adw_dialog_new());
+    adw_dialog_set_title(a->artist_dialog, "Artist");
+    adw_dialog_set_content_width(a->artist_dialog, 560);
+    adw_dialog_set_content_height(a->artist_dialog, 680);
+    adw_dialog_set_child(a->artist_dialog, GTK_WIDGET(tv));
+    g_signal_connect(a->artist_dialog, "closed", G_CALLBACK(on_artist_closed), a);
+    adw_dialog_present(a->artist_dialog, GTK_WIDGET(a->win));
+  } else {
+    adw_dialog_present(a->artist_dialog, GTK_WIDGET(a->win)); /* raise the open one */
+  }
+
+  /* (re)load the requested artist off the main loop */
+  a->artist_gen++;
+  g_free(a->artist_req_id);
+  a->artist_req_id = g_strdup(artist_id);
+  artist_set_status(a, "Loading…");
+
+  ArtistCtx *c = g_new0(ArtistCtx, 1);
+  c->id = g_strdup(artist_id);
+  c->gen = a->artist_gen;
+  GTask *t = g_task_new(NULL, NULL, artist_done, NULL);
+  g_task_set_task_data(t, c, artist_ctx_free);
+  g_task_run_in_thread(t, artist_worker);
+  g_object_unref(t);
+}
+
+/* now-playing-bar shortcuts */
+static void on_lyrics_clicked(GtkButton *b, gpointer data) { (void)b; open_lyrics((App *)data); }
+static void on_artist_clicked(GtkButton *b, gpointer data) {
+  (void)b;
+  App *a = data;
+  DzTrack *t = mpris_current_track(a);
+  if (!t) { toast(a, "Play a track first"); return; }
+  char *aid = g_strdup(t->artist_id);
+  g_object_unref(t);
+  if (aid && *aid) open_artist(a, aid);
+  else toast(a, "No artist for this track");
+  g_free(aid);
+}
+
+/* ---------------------------------------------------------------------------
  * 300 ms poll: scrubber position, transport icon, natural-finish auto-advance
  * ------------------------------------------------------------------------- */
 
@@ -1106,6 +1768,21 @@ static gboolean tick(gpointer data) {
     a->last_finished = fin;
     play_relative(a, 1); /* auto-advance */
   }
+
+  /* keep the lyrics view in step: refetch when the track changes, then advance
+   * the synced highlight to the current playback position. */
+  if (a->lyrics_dialog) {
+    DzTrack *ct = mpris_current_track(a);
+    const char *cid = ct ? ct->id : "";
+    if (g_strcmp0(cid, a->lyrics_req_id ? a->lyrics_req_id : "") != 0) {
+      if (ct && a->lyrics_titlew)
+        adw_window_title_set_subtitle(ADW_WINDOW_TITLE(a->lyrics_titlew), ct->name);
+      lyrics_load(a, cid);
+    }
+    if (ct) g_object_unref(ct);
+    lyrics_highlight(a);
+  }
+
   return G_SOURCE_CONTINUE;
 }
 
@@ -1230,7 +1907,11 @@ static void load_css(void) {
       "@define-color accent_bg_color " ACCENT ";\n"
       "@define-color accent_color " ACCENT ";\n"
       "@define-color accent_fg_color #ffffff;\n"
-      ".np-cover{border-radius:6px;}\n";
+      ".np-cover{border-radius:6px;}\n"
+      ".dz-avatar{border-radius:9999px;}\n"
+      ".lyrics-line{padding:5px 14px;opacity:0.45;}\n"
+      ".lyrics-line.lyrics-active{opacity:1;font-weight:700;color:" ACCENT ";}\n"
+      ".lyrics-plain{padding:8px 14px;}\n";
   GtkCssProvider *p = gtk_css_provider_new();
 #if GTK_CHECK_VERSION(4, 12, 0)
   gtk_css_provider_load_from_string(p, css);
@@ -1282,6 +1963,21 @@ static GtkWidget *build_now_playing(App *a) {
   gtk_box_append(GTK_BOX(titles), GTK_WIDGET(a->np_title));
   gtk_box_append(GTK_BOX(titles), GTK_WIDGET(a->np_subtitle));
   gtk_box_append(GTK_BOX(bar), titles);
+
+  /* lyrics + artist shortcuts for the current track */
+  GtkWidget *lyrics_btn = gtk_button_new_from_icon_name("view-list-symbolic");
+  gtk_widget_add_css_class(lyrics_btn, "flat");
+  gtk_widget_set_valign(lyrics_btn, GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text(lyrics_btn, "Lyrics");
+  g_signal_connect(lyrics_btn, "clicked", G_CALLBACK(on_lyrics_clicked), a);
+  gtk_box_append(GTK_BOX(bar), lyrics_btn);
+
+  GtkWidget *artist_btn = gtk_button_new_from_icon_name("avatar-default-symbolic");
+  gtk_widget_add_css_class(artist_btn, "flat");
+  gtk_widget_set_valign(artist_btn, GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text(artist_btn, "Go to artist");
+  g_signal_connect(artist_btn, "clicked", G_CALLBACK(on_artist_clicked), a);
+  gtk_box_append(GTK_BOX(bar), artist_btn);
 
   /* transport */
   a->prev_btn = transport_button("media-skip-backward-symbolic");
