@@ -105,14 +105,25 @@ struct PlayerBar: View {
 
     private var utilities: some View {
         HStack(spacing: 14) {
-            Image(systemName: "list.bullet").foregroundStyle(DZ.textSec)
+            // Lyrics for the now-playing track.
+            iconButton("quote.bubble", tint: app.showLyrics ? DZ.accent : DZ.textSec) {
+                app.showLyrics = true
+            }
+            .disabled(app.current == nil)
+            .help("Lyrics")
+            // Jump to the now-playing track's artist.
+            iconButton("music.mic", tint: DZ.textSec) {
+                app.openArtistForCurrent()
+            }
+            .disabled(app.current?.artists.first == nil)
+            .help("Go to Artist")
             HStack(spacing: 6) {
                 Image(systemName: "speaker.fill").font(.system(size: 11)).foregroundStyle(DZ.textSec)
                 Slider(value: Binding(get: { app.volume }, set: { app.setVolume($0) }), in: 0...1)
                     .frame(width: 84).tint(DZ.accent)
             }
         }
-        .frame(width: 150, alignment: .trailing)
+        .frame(width: 210, alignment: .trailing)
     }
 
     private func iconButton(_ symbol: String, size: CGFloat = 15,

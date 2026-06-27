@@ -47,6 +47,8 @@ struct RootView: View {
         .background(DZ.windowBG)
         .sheet(isPresented: $app.showCredits) { CreditsView() }
         .sheet(isPresented: $app.showSettings) { SettingsView() }
+        .sheet(isPresented: $app.showLyrics) { LyricsView() }
+        .sheet(isPresented: $app.showArtist) { ArtistView() }
     }
 }
 
@@ -353,6 +355,7 @@ struct TrackTable: View {
 }
 
 struct TrackRowView: View {
+    @EnvironmentObject var app: AppState
     let index: Int
     let track: Track
     let isCurrent: Bool
@@ -392,6 +395,14 @@ struct TrackRowView: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onPlay)
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
+        .contextMenu {
+            Button { onPlay() } label: { Label("Play", systemImage: "play.fill") }
+            if let aid = track.artists.first?.id {
+                Button { app.openArtist(aid) } label: {
+                    Label("Go to Artist", systemImage: "music.mic")
+                }
+            }
+        }
     }
 }
 

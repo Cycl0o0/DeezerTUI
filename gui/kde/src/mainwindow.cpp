@@ -5,6 +5,7 @@
 #include <QAction>
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QBrush>
 #include <QCloseEvent>
 #include <QColor>
 #include <QDir>
@@ -23,6 +24,7 @@
 #include <QLineEdit>
 #include <QListView>
 #include <QListWidget>
+#include <QLocale>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -34,6 +36,7 @@
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStringList>
 #include <QStyle>
 #include <QSystemTrayIcon>
 #include <QTableWidget>
@@ -107,7 +110,33 @@ Track parseTrack(const QJsonObject &o) {
     t.artistLine = o.value("artistLine").toString();
     t.albumName  = o.value("albumName").toString();
     t.artworkUrl = o.value("artworkUrl").toString();
+    // First artist's id — used to open the artist view from a track.
+    const QJsonArray as = o.value("artists").toArray();
+    if (!as.isEmpty())
+        t.artistId = as.first().toObject().value("id").toString();
     return t;
+}
+ArtistInfo parseArtistInfo(const QJsonObject &o) {
+    ArtistInfo a;
+    a.id         = o.value("id").toString();
+    a.name       = o.value("name").toString();
+    a.artworkUrl = o.value("artworkUrl").toString();
+    a.nbFans     = o.value("nbFans").toInt();
+    return a;
+}
+LyricsData parseLyrics(const QByteArray &json) {
+    LyricsData d;
+    const QJsonObject o = QJsonDocument::fromJson(json).object();
+    d.isSynced = o.value("isSynced").toBool();
+    d.plain    = o.value("plain").toString();
+    for (const QJsonValue &v : o.value("synced").toArray()) {
+        const QJsonObject lo = v.toObject();
+        LyricsLine ln;
+        ln.timeMs = static_cast<qint64>(lo.value("timeMs").toDouble());
+        ln.text   = lo.value("text").toString();
+        d.lines.push_back(ln);
+    }
+    return d;
 }
 Album parseAlbum(const QJsonObject &o) {
     Album a;
@@ -210,6 +239,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_stack->addWidget(buildTracksPage());    // index 0
     m_stack->addWidget(buildPlaylistsPage()); // index 1
     m_stack->addWidget(buildSearchPage());    // index 2
+    m_stack->addWidget(buildLyricsPage());    // index 3
+    m_stack->addWidget(buildArtistPage());    // index 4
 
     auto *split = new QSplitter(Qt::Horizontal);
     split->addWidget(m_sidebar);
@@ -488,6 +519,7 @@ QWidget *MainWindow::buildTracksPage() {
     // cellActivated fires on Enter + (single/double)-click per the KDE setting.
     connect(m_trackTable, &QTableWidget::cellActivated, this,
             [this](int row, int) { playFrom(m_tableTracks, row); });
+    installTrackMenu(m_trackTable, &m_tableTracks);
     v->addWidget(m_trackTable, 1);
     return w;
 }
@@ -534,6 +566,7 @@ QWidget *MainWindow::buildSearchPage() {
     m_searchTrackTable = makeTrackTable();
     connect(m_searchTrackTable, &QTableWidget::cellActivated, this,
             [this](int row, int) { playFrom(m_searchTracks, row); });
+    installTrackMenu(m_searchTrackTable, &m_searchTracks);
     v->addWidget(m_searchTrackTable, 2);
 
     v->addWidget(new QLabel("Albums & Playlists"));
@@ -576,6 +609,21 @@ QWidget *MainWindow::buildTransport() {
     m_nowPlaying = new QLabel("Not playing");
     m_nowPlaying->setMinimumWidth(180);
     h->addWidget(m_nowPlaying, 0);
+
+    // Lyrics / Artist detail for the current track, sitting next to its title.
+    auto *lyricsBtn = new QToolButton;
+    lyricsBtn->setText(QStringLiteral("Lyrics"));
+    lyricsBtn->setAutoRaise(true);
+    lyricsBtn->setToolTip(QStringLiteral("Show lyrics for the current track"));
+    connect(lyricsBtn, &QToolButton::clicked, this, &MainWindow::openLyrics);
+    h->addWidget(lyricsBtn);
+
+    auto *artistBtn = new QToolButton;
+    artistBtn->setText(QStringLiteral("Artist"));
+    artistBtn->setAutoRaise(true);
+    artistBtn->setToolTip(QStringLiteral("Open the current track's artist"));
+    connect(artistBtn, &QToolButton::clicked, this, &MainWindow::openArtistForCurrent);
+    h->addWidget(artistBtn);
 
     m_prevBtn = mediaButton(style(), QStyle::SP_MediaSkipBackward);
     m_playBtn = mediaButton(style(), QStyle::SP_MediaPlay);
@@ -850,6 +898,379 @@ void MainWindow::runSearch() {
     });
 }
 
+// ---- lyrics + artist pages ------------------------------------------------
+
+// Right-click menu shared by every track table: jump to the row's artist or
+// show its lyrics. src points at the QVector backing the table's rows.
+void MainWindow::installTrackMenu(QTableWidget *table, QVector<Track> *src) {
+    table->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(table, &QWidget::customContextMenuRequested, this,
+            [this, table, src](const QPoint &pos) {
+                const int row = table->rowAt(pos.y());
+                if (row < 0 || row >= src->size())
+                    return;
+                const Track t = src->at(row);
+                QMenu menu(this);
+                QAction *goArtist = menu.addAction(QStringLiteral("Go to Artist"));
+                goArtist->setEnabled(!t.artistId.isEmpty());
+                QAction *showLy = menu.addAction(QStringLiteral("Show Lyrics"));
+                QAction *chosen = menu.exec(table->viewport()->mapToGlobal(pos));
+                if (chosen == goArtist)
+                    openArtist(t.artistId);
+                else if (chosen == showLy)
+                    openLyricsFor(t.id, t.name + QStringLiteral("   ·   ") + t.artistLine);
+            });
+}
+
+// Only the three browse pages (0..2) are valid "Back" targets — never another
+// detour page, so Back from lyrics/artist always lands somewhere sensible.
+void MainWindow::rememberReturnPage() {
+    const int cur = m_stack->currentIndex();
+    if (cur >= 0 && cur <= 2)
+        m_returnPage = cur;
+}
+
+QWidget *MainWindow::buildLyricsPage() {
+    auto *w = new QWidget;
+    auto *v = new QVBoxLayout(w);
+
+    auto *top = new QHBoxLayout;
+    auto *back = new QToolButton;
+    back->setText(QStringLiteral("‹ Back"));
+    back->setAutoRaise(true);
+    connect(back, &QToolButton::clicked, this,
+            [this] { m_stack->setCurrentIndex(m_returnPage); });
+    top->addWidget(back);
+    m_lyricsTitle = new QLabel(QStringLiteral("Lyrics"));
+    QFont tf = m_lyricsTitle->font();
+    tf.setPointSize(tf.pointSize() + 4);
+    tf.setBold(true);
+    m_lyricsTitle->setFont(tf);
+    top->addWidget(m_lyricsTitle, 1);
+    v->addLayout(top);
+
+    m_lyricsList = new QListWidget;
+    m_lyricsList->setSelectionMode(QAbstractItemView::NoSelection);
+    m_lyricsList->setFocusPolicy(Qt::NoFocus);
+    m_lyricsList->setWordWrap(true);
+    m_lyricsList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    v->addWidget(m_lyricsList, 1);
+    return w;
+}
+
+QWidget *MainWindow::buildArtistPage() {
+    auto *w = new QWidget;
+    auto *v = new QVBoxLayout(w);
+
+    auto *top = new QHBoxLayout;
+    auto *back = new QToolButton;
+    back->setText(QStringLiteral("‹ Back"));
+    back->setAutoRaise(true);
+    connect(back, &QToolButton::clicked, this,
+            [this] { m_stack->setCurrentIndex(m_returnPage); });
+    top->addWidget(back);
+    top->addStretch(1);
+    v->addLayout(top);
+
+    // Header: avatar + name + fan count.
+    auto *head = new QHBoxLayout;
+    m_artistAvatar = new QLabel;
+    m_artistAvatar->setFixedSize(72, 72);
+    m_artistAvatar->setScaledContents(true);
+    m_artistAvatar->setPixmap(placeholderPix(72));
+    head->addWidget(m_artistAvatar);
+    auto *names = new QVBoxLayout;
+    m_artistName = new QLabel(QStringLiteral("Artist"));
+    QFont nf = m_artistName->font();
+    nf.setPointSize(nf.pointSize() + 6);
+    nf.setBold(true);
+    m_artistName->setFont(nf);
+    m_artistFans = new QLabel;
+    names->addWidget(m_artistName);
+    names->addWidget(m_artistFans);
+    names->addStretch(1);
+    head->addLayout(names, 1);
+    v->addLayout(head);
+
+    v->addWidget(new QLabel(QStringLiteral("Top Tracks")));
+    m_artistTopTable = makeTrackTable();
+    connect(m_artistTopTable, &QTableWidget::cellActivated, this,
+            [this](int row, int) { playFrom(m_artistTopTracks, row); });
+    installTrackMenu(m_artistTopTable, &m_artistTopTracks);
+    v->addWidget(m_artistTopTable, 2);
+
+    v->addWidget(new QLabel(QStringLiteral("Albums")));
+    m_artistAlbumsGrid = new QListWidget;
+    m_artistAlbumsGrid->setViewMode(QListView::IconMode);
+    m_artistAlbumsGrid->setIconSize(QSize(110, 110));
+    m_artistAlbumsGrid->setGridSize(QSize(140, 165));
+    m_artistAlbumsGrid->setResizeMode(QListView::Adjust);
+    m_artistAlbumsGrid->setMovement(QListView::Static);
+    m_artistAlbumsGrid->setWordWrap(true);
+    connect(m_artistAlbumsGrid, &QListWidget::itemActivated, this,
+            [this](QListWidgetItem *it) {
+                const int idx = it->data(Qt::UserRole).toInt();
+                if (idx >= 0 && idx < m_artistAlbums.size())
+                    openAlbum(m_artistAlbums[idx]);
+            });
+    v->addWidget(m_artistAlbumsGrid, 1);
+
+    v->addWidget(new QLabel(QStringLiteral("Related Artists")));
+    m_artistRelatedGrid = new QListWidget;
+    m_artistRelatedGrid->setViewMode(QListView::IconMode);
+    m_artistRelatedGrid->setIconSize(QSize(110, 110));
+    m_artistRelatedGrid->setGridSize(QSize(140, 165));
+    m_artistRelatedGrid->setResizeMode(QListView::Adjust);
+    m_artistRelatedGrid->setMovement(QListView::Static);
+    m_artistRelatedGrid->setWordWrap(true);
+    connect(m_artistRelatedGrid, &QListWidget::itemActivated, this,
+            [this](QListWidgetItem *it) {
+                const int idx = it->data(Qt::UserRole).toInt();
+                if (idx >= 0 && idx < m_artistRelated.size())
+                    openArtist(m_artistRelated[idx].id);
+            });
+    v->addWidget(m_artistRelatedGrid, 1);
+    return w;
+}
+
+// ---- lyrics flow ----------------------------------------------------------
+
+// Transport "Lyrics" button: the lyrics follow whatever is playing.
+void MainWindow::openLyrics() {
+    if (!m_hasCurrent) {
+        statusBar()->showMessage(QStringLiteral("Nothing is playing"), 3000);
+        return;
+    }
+    m_lyricsFollowsPlayback = true;
+    rememberReturnPage();
+    m_stack->setCurrentIndex(3);
+    loadLyrics(m_current.id,
+               m_current.name + QStringLiteral("   ·   ") + m_current.artistLine);
+}
+
+// Context-menu "Show Lyrics": a specific, possibly-not-playing track. These do
+// not auto-refresh when the playing track changes.
+void MainWindow::openLyricsFor(const QString &trackId, const QString &title) {
+    if (!m_loggedIn || trackId.isEmpty())
+        return;
+    m_lyricsFollowsPlayback = false;
+    rememberReturnPage();
+    m_stack->setCurrentIndex(3);
+    loadLyrics(trackId, title);
+}
+
+// Fetch (or serve from cache) the lyrics for a track and render them.
+void MainWindow::loadLyrics(const QString &trackId, const QString &title) {
+    m_lyricsRequestedId = trackId;
+    m_lyricsTitle->setText(title);
+
+    const auto it = m_lyricsCache.constFind(trackId);
+    if (it != m_lyricsCache.constEnd()) {
+        renderLyrics(trackId, title, it.value()); // cached — no network
+        return;
+    }
+
+    // Cache miss: show a placeholder, fetch on a worker (DZLyricsJSON is network).
+    m_lyricsList->clear();
+    m_lyricsTimes.clear();
+    m_lyricsActiveRow = -1;
+    m_lyricsIsSynced  = false;
+    m_lyricsShownId.clear();
+    m_lyricsList->addItem(new QListWidgetItem(QStringLiteral("Loading lyrics…")));
+
+    const int gen = ++m_lyricsGen;
+    const QByteArray idb = trackId.toUtf8();
+    QtConcurrent::run([this, idb, trackId, title, gen] {
+        const LyricsData d = parseLyrics(takeJson(DZLyricsJSON(cstr(idb))));
+        QMetaObject::invokeMethod(this, [this, trackId, title, d, gen] {
+            if (gen != m_lyricsGen)
+                return; // a newer lyrics request superseded this one
+            m_lyricsCache.insert(trackId, d);
+            renderLyrics(trackId, title, d);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::renderLyrics(const QString &trackId, const QString &title,
+                              const LyricsData &d) {
+    m_lyricsTitle->setText(title);
+    m_lyricsList->clear();
+    m_lyricsTimes.clear();
+    m_lyricsActiveRow = -1;
+    m_lyricsShownId   = trackId;
+    m_lyricsIsSynced  = d.isSynced && !d.lines.isEmpty();
+
+    if (m_lyricsIsSynced) {
+        for (const LyricsLine &ln : d.lines) {
+            auto *item = new QListWidgetItem(
+                ln.text.isEmpty() ? QStringLiteral(" ") : ln.text);
+            item->setTextAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
+            m_lyricsList->addItem(item);
+            m_lyricsTimes.push_back(ln.timeMs);
+        }
+        updateLyricsHighlight(DZPositionMS()); // set the active line right away
+        return;
+    }
+
+    const QString plain = d.plain.trimmed();
+    if (plain.isEmpty()) {
+        m_lyricsList->addItem(
+            new QListWidgetItem(QStringLiteral("No lyrics available.")));
+        return;
+    }
+    const QStringList lines = plain.split('\n');
+    for (const QString &line : lines) {
+        auto *item = new QListWidgetItem(line);
+        item->setTextAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
+        m_lyricsList->addItem(item);
+    }
+}
+
+// Highlight the last synced line whose start time has passed, and scroll to it.
+// Driven by the existing UI tick (same timer that advances the seek bar).
+void MainWindow::updateLyricsHighlight(qint64 posMs) {
+    if (!m_lyricsIsSynced || m_lyricsTimes.isEmpty())
+        return;
+    int active = -1;
+    for (int i = 0; i < m_lyricsTimes.size(); ++i) {
+        if (m_lyricsTimes[i] <= posMs)
+            active = i;
+        else
+            break;
+    }
+    if (active == m_lyricsActiveRow)
+        return;
+
+    if (m_lyricsActiveRow >= 0 && m_lyricsActiveRow < m_lyricsList->count()) {
+        QListWidgetItem *old = m_lyricsList->item(m_lyricsActiveRow);
+        QFont f = old->font();
+        f.setBold(false);
+        old->setFont(f);
+        old->setForeground(QBrush()); // restore palette default
+    }
+    m_lyricsActiveRow = active;
+    if (active >= 0 && active < m_lyricsList->count()) {
+        QListWidgetItem *it = m_lyricsList->item(active);
+        QFont f = it->font();
+        f.setBold(true);
+        it->setFont(f);
+        it->setForeground(QBrush(QColor(kAccent)));
+        m_lyricsList->scrollToItem(it, QAbstractItemView::PositionAtCenter);
+    }
+}
+
+// ---- artist flow ----------------------------------------------------------
+
+void MainWindow::openArtistForCurrent() {
+    if (!m_hasCurrent) {
+        statusBar()->showMessage(QStringLiteral("Nothing is playing"), 3000);
+        return;
+    }
+    if (m_current.artistId.isEmpty()) {
+        statusBar()->showMessage(
+            QStringLiteral("Artist unavailable for this track"), 3000);
+        return;
+    }
+    openArtist(m_current.artistId);
+}
+
+void MainWindow::openArtist(const QString &artistId) {
+    if (!m_loggedIn || artistId.isEmpty())
+        return;
+    rememberReturnPage();
+    m_stack->setCurrentIndex(4);
+    statusBar()->showMessage(QStringLiteral("Loading artist…"));
+
+    // Reset the page to a loading state.
+    m_artistName->setText(QStringLiteral("Loading…"));
+    m_artistFans->clear();
+    m_artistAvatar->setPixmap(placeholderPix(72));
+    m_artistTopTracks.clear();
+    m_artistTopTable->clearContents();
+    m_artistTopTable->setRowCount(0);
+    m_artistAlbums.clear();
+    m_artistAlbumsGrid->clear();
+    m_artistRelated.clear();
+    m_artistRelatedGrid->clear();
+
+    const int gen = ++m_artGen; // also invalidates any in-flight cover art
+    const QByteArray idb = artistId.toUtf8();
+    QtConcurrent::run([this, idb, gen] {
+        const QByteArray j = takeJson(DZArtistProfileJSON(cstr(idb)));
+        QMetaObject::invokeMethod(this, [this, j, gen] {
+            renderArtist(j, gen);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::renderArtist(const QByteArray &json, int gen) {
+    if (gen != m_artGen)
+        return; // a newer load (another artist / list reload) took over
+    const QJsonObject obj = QJsonDocument::fromJson(json).object();
+    if (obj.contains("error")) {
+        m_artistName->setText(QStringLiteral("Artist unavailable"));
+        statusBar()->showMessage(QStringLiteral("Could not load artist"), 3000);
+        return;
+    }
+
+    const ArtistInfo info = parseArtistInfo(obj.value("artist").toObject());
+    m_artistName->setText(info.name.isEmpty() ? QStringLiteral("Artist") : info.name);
+    m_artistFans->setText(info.nbFans > 0
+        ? QLocale().toString(info.nbFans) + QStringLiteral(" fans")
+        : QString());
+    m_artistAvatar->setPixmap(placeholderPix(72));
+    if (!info.artworkUrl.isEmpty())
+        fetchImage(info.artworkUrl, gen, [this](const QImage &img) {
+            m_artistAvatar->setPixmap(QPixmap::fromImage(img).scaled(
+                72, 72, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        });
+
+    // Top tracks — playable through the shared play path.
+    m_artistTopTracks.clear();
+    for (const QJsonValue &v : obj.value("top").toArray())
+        m_artistTopTracks.push_back(parseTrack(v.toObject()));
+    fillTrackTable(m_artistTopTable, m_artistTopTracks, gen);
+
+    // Albums — open through the existing album-tracks path.
+    m_artistAlbums.clear();
+    m_artistAlbumsGrid->clear();
+    for (const QJsonValue &v : obj.value("albums").toArray())
+        m_artistAlbums.push_back(parseAlbum(v.toObject()));
+    for (int i = 0; i < m_artistAlbums.size(); ++i) {
+        const Album &a = m_artistAlbums[i];
+        auto *it = new QListWidgetItem(QIcon(placeholderPix(110)),
+                                       a.name + "\n" + a.artistLine);
+        it->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+        it->setData(Qt::UserRole, i);
+        m_artistAlbumsGrid->addItem(it);
+        if (!a.artworkUrl.isEmpty())
+            fetchImage(a.artworkUrl, gen, [it](const QImage &img) {
+                it->setIcon(QIcon(QPixmap::fromImage(img).scaled(
+                    110, 110, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+            });
+    }
+
+    // Related artists — clicking opens that artist's page (recurses).
+    m_artistRelated.clear();
+    m_artistRelatedGrid->clear();
+    for (const QJsonValue &v : obj.value("related").toArray())
+        m_artistRelated.push_back(parseArtistInfo(v.toObject()));
+    for (int i = 0; i < m_artistRelated.size(); ++i) {
+        const ArtistInfo &ar = m_artistRelated[i];
+        auto *it = new QListWidgetItem(QIcon(placeholderPix(110)), ar.name);
+        it->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+        it->setData(Qt::UserRole, i);
+        m_artistRelatedGrid->addItem(it);
+        if (!ar.artworkUrl.isEmpty())
+            fetchImage(ar.artworkUrl, gen, [it](const QImage &img) {
+                it->setIcon(QIcon(QPixmap::fromImage(img).scaled(
+                    110, 110, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+            });
+    }
+
+    statusBar()->showMessage(info.name, 3000);
+}
+
 // ---- track table fill + async art ----------------------------------------
 
 void MainWindow::fillTrackTable(QTableWidget *table, const QVector<Track> &tracks, int gen) {
@@ -1023,6 +1444,15 @@ void MainWindow::tick() {
             DZFree(fp);
         }
         m_nowPlaying->setText(m_current.name + "\n" + sub);
+    }
+
+    // Lyrics page: follow the playing track and keep the synced line highlighted.
+    if (m_stack->currentIndex() == 3) {
+        if (m_lyricsFollowsPlayback && m_hasCurrent &&
+            m_current.id != m_lyricsRequestedId)
+            loadLyrics(m_current.id,
+                       m_current.name + QStringLiteral("   ·   ") + m_current.artistLine);
+        updateLyricsHighlight(pos);
     }
 
     const int f = DZFinishedCount();

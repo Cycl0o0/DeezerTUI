@@ -39,6 +39,18 @@ final class AppState: ObservableObject {
     @Published var searchPlaylists: [Playlist] = []
     @Published var query = ""
 
+    // Lyrics sheet (current track's lyrics; synced highlight driven by `tick`).
+    @Published var showLyrics = false
+    @Published var currentLyrics: Lyrics?     // lyrics for `lyricsTrackID`; nil => none/loading
+    @Published var lyricsLoading = false
+    private var lyricsCache: [String: Lyrics] = [:]   // per-track-id cache
+    private var lyricsTrackID: String?                 // which track currentLyrics belongs to
+
+    // Artist detail sheet (DZArtistProfileJSON).
+    @Published var showArtist = false
+    @Published var artistProfile: ArtistProfile?
+    @Published var artistLoading = false
+
     // playback
     @Published var current: Track?
     @Published var state: PlayerState = .stopped
@@ -206,6 +218,66 @@ final class AppState: ObservableObject {
             let ts = fetch()
             await MainActor.run { self.tracks = ts; self.busy = false }
         }
+    }
+
+    // MARK: lyrics
+
+    // Fetch the current track's lyrics (cached per track id). Called from the
+    // lyrics sheet on appear and whenever the playing track changes. A nil
+    // result is cached as "no lyrics" so we don't refetch on every tick.
+    func loadLyricsIfNeeded() {
+        guard let id = current?.id, !id.isEmpty else {
+            currentLyrics = nil; lyricsTrackID = nil; lyricsLoading = false
+            return
+        }
+        if lyricsTrackID == id { return }   // already loaded / loading this track
+        lyricsTrackID = id
+        if let cached = lyricsCache[id] {
+            currentLyrics = cached
+            return
+        }
+        currentLyrics = nil
+        lyricsLoading = true
+        Task.detached {
+            let ly = Core.lyrics(id)
+            await MainActor.run {
+                self.lyricsLoading = false
+                // Ignore a stale fetch if the track changed meanwhile.
+                guard self.lyricsTrackID == id else { return }
+                if let ly { self.lyricsCache[id] = ly }
+                self.currentLyrics = ly
+            }
+        }
+    }
+
+    // MARK: artist
+
+    func openArtist(_ id: String) {
+        guard !id.isEmpty else { return }
+        showArtist = true
+        artistProfile = nil
+        artistLoading = true
+        Task.detached {
+            let p = Core.artistProfile(id)
+            await MainActor.run {
+                self.artistLoading = false
+                self.artistProfile = p
+            }
+        }
+    }
+
+    // Open the artist of the now-playing track (first credited artist).
+    func openArtistForCurrent() {
+        guard let id = current?.artists.first?.id else { return }
+        openArtist(id)
+    }
+
+    // Navigate from the artist sheet into an album, surfacing it in the main
+    // detail column (reuses the existing album-tracks path).
+    func openAlbumFromArtist(_ a: Album) {
+        showArtist = false
+        if section == .search { section = .playlists }  // ensure the track list shows
+        openAlbum(a)
     }
 
     // MARK: playback
