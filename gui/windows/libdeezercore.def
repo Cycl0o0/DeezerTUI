@@ -31,3 +31,10 @@ EXPORTS
   DZHighQuality
   DZQuality
   DZFormat
+  DZAccountJSON
+  DZChartsJSON
+  DZArtistTopJSON
+  DZArtistProfileJSON
+  DZLyricsJSON
+  DZSetReplayGain
+  DZReplayGain
