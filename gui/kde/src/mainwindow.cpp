@@ -322,7 +322,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setupTray();    // background playback + close-to-tray
 
     statusBar()->showMessage("Logging in…");
-    startLogin();
+    // Defer to the event loop: startLogin() may exec() the modal login dialog,
+    // and running that nested loop from inside the constructor (before the main
+    // window is shown / app.exec() runs) blocks construction so no window ever
+    // appears. singleShot(0) fires it after the window is up.
+    QTimer::singleShot(0, this, &MainWindow::startLogin);
 }
 
 // ---- OS integration: MPRIS, tray, settings --------------------------------
