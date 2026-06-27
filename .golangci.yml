@@ -21,6 +21,21 @@ linters:
       # can't satisfy io.Seeker; disable just that analyzer (all others stay on).
       disable:
         - stdmethods
+    staticcheck:
+      # Blowfish is required — Deezer's CDN streams use BF_CBC_STRIPE, so the
+      # SA1019 "deprecated" warning on x/crypto/blowfish can't be acted on.
+      checks:
+        - all
+        - -SA1019
+    errcheck:
+      # Idiomatic fire-and-forget calls: Close on teardown, Fprintf to a log
+      # sink, and the MPRIS D-Bus exports (failure there only loses media keys).
+      exclude-functions:
+        - (io.Closer).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*github.com/godbus/dbus/v5.Conn).Export
     gocritic:
       disabled-checks:
         - ifElseChain

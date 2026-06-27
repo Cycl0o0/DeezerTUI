@@ -158,7 +158,6 @@ type loginDoneMsg struct{ err error }
 type tracksMsg struct {
 	title  string
 	tracks []deezer.Track
-	play   bool // auto-play first track (queue context)
 }
 type playlistsMsg struct {
 	title     string

@@ -138,9 +138,10 @@ func (m *Model) footer() string {
 	if hasCur && (m.playing || st == audio.Playing || st == audio.Paused) {
 		t := cur
 		icon := "▶"
-		if st == audio.Paused {
+		switch st {
+		case audio.Paused:
 			icon = "⏸"
-		} else if st == audio.Loading {
+		case audio.Loading:
 			icon = "…"
 		}
 		now = fmt.Sprintf("%s %s %s",

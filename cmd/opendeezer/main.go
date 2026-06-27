@@ -40,11 +40,11 @@ func main() {
 	}
 
 	// File logging (level via $OPENDEEZER_LOG); never writes to stdout, so the
-	// TUI is unaffected. Best-effort: discards on failure.
+	// TUI is unaffected. Best-effort: discards on failure. The log file is held
+	// open for the process lifetime and released by the OS on exit (some paths
+	// below call os.Exit, which would skip a deferred Close anyway).
 	if base, err := os.UserConfigDir(); err == nil {
-		if f, err := odlog.OpenFile(filepath.Join(base, "opendeezer")); err == nil {
-			defer f.Close()
-		}
+		_, _ = odlog.OpenFile(filepath.Join(base, "opendeezer"))
 	}
 	odlog.Info("opendeezer %s starting", version)
 
