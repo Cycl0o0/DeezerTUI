@@ -11,6 +11,12 @@
 // executable wraps it with a trivial main (standalone.cpp).
 extern "C" __attribute__((visibility("default")))
 int opendeezer_run(int argc, char **argv) {
+    // QtWebEngine's Chromium GPU process frequently crashes on Wayland/KDE
+    // (symptom: clicking "Log in with Deezer" closes the window). Force software
+    // GPU so the embedded login webview starts reliably. Respect a user override.
+    if (qEnvironmentVariableIsEmpty("QTWEBENGINE_CHROMIUM_FLAGS"))
+        qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --disable-gpu-compositing");
+
     // QtWebEngine (the embedded Deezer login webview, src/logindialog.cpp) shares
     // an OpenGL context with the GUI; this attribute must be set before the
     // QApplication is constructed. Harmless when the webview is never opened.
