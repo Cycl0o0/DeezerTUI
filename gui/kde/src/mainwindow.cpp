@@ -8,6 +8,8 @@
 #include <QBrush>
 #include <QCloseEvent>
 #include <QColor>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -16,6 +18,7 @@
 #include <QHeaderView>
 #include <QIcon>
 #include <QImage>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -67,6 +70,30 @@ extern "C" char *DZArtistProfileJSON(char *id); // {artist,top,albums,related}
 extern "C" char *DZLyricsJSON(char *trackID);   // {plain,synced:[{timeMs,text}],isSynced}
 extern "C" void  DZSetReplayGain(int on);       // 1=on, 0=off
 extern "C" int   DZReplayGain(void);            // 1=on, 0=off
+
+// v0.4 additions. Redeclared here (like the blocks above) so the GUI still
+// builds against an older generated header; identical redeclarations are
+// harmless. *JSON results are malloc'd C strings — free with DZFree. Mutations
+// return int (1 = ok, 0 = fail).
+extern "C" int   DZAddFavorite(char *trackID);
+extern "C" int   DZRemoveFavorite(char *trackID);
+extern "C" int   DZAddToPlaylist(char *playlistID, char *trackID);
+extern "C" int   DZRemoveFromPlaylist(char *playlistID, char *trackID);
+extern "C" char *DZCreatePlaylist(char *title);            // {"id":"..."}
+extern "C" int   DZRenamePlaylist(char *playlistID, char *title);
+extern "C" int   DZDeletePlaylist(char *playlistID);
+extern "C" char *DZFlowJSON(void);                         // {tracks:[...]}
+extern "C" char *DZSearchPodcastsJSON(char *q);            // {podcasts:[...]}
+extern "C" char *DZPodcastEpisodesJSON(char *podcastID);   // {episodes:[...]}
+extern "C" int   DZPlayEpisode(char *episodeID, long long durationMs);
+extern "C" char *DZAudioDevicesJSON(void);                 // {devices:[{id,name,isDefault}]}
+extern "C" int   DZSetAudioDevice(char *id);               // "" = system default
+extern "C" char *DZCurrentAudioDevice(void);               // malloc'd; free with DZFree
+extern "C" void  DZSetGapless(int on);
+extern "C" int   DZGapless(void);
+extern "C" void  DZSetCrossfadeMS(int ms);
+extern "C" int   DZCrossfadeMS(void);
+extern "C" void  DZPreload(char *trackID, long long durationMs);
 
 namespace {
 
@@ -157,6 +184,25 @@ Playlist parsePlaylist(const QJsonObject &o) {
     p.artworkUrl = o.value("artworkUrl").toString();
     return p;
 }
+Podcast parsePodcast(const QJsonObject &o) {
+    Podcast p;
+    p.id           = o.value("id").toString();
+    p.name         = o.value("name").toString();
+    p.description  = o.value("description").toString();
+    p.artworkUrl   = o.value("artworkUrl").toString();
+    p.episodeCount = o.value("episodeCount").toInt();
+    return p;
+}
+Episode parseEpisode(const QJsonObject &o) {
+    Episode e;
+    e.id          = o.value("id").toString();
+    e.title       = o.value("title").toString();
+    e.description = o.value("description").toString();
+    e.artworkUrl  = o.value("artworkUrl").toString();
+    e.durationMs  = static_cast<qint64>(o.value("durationMs").toDouble());
+    e.releaseDate = o.value("releaseDate").toString();
+    return e;
+}
 
 QVector<Track> parseTracks(const QByteArray &json) {
     QVector<Track> out;
@@ -236,11 +282,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     buildSidebar();
 
     m_stack = new QStackedWidget;
-    m_stack->addWidget(buildTracksPage());    // index 0
-    m_stack->addWidget(buildPlaylistsPage()); // index 1
-    m_stack->addWidget(buildSearchPage());    // index 2
-    m_stack->addWidget(buildLyricsPage());    // index 3
-    m_stack->addWidget(buildArtistPage());    // index 4
+    m_stack->addWidget(buildTracksPage());          // index 0
+    m_stack->addWidget(buildPlaylistsPage());       // index 1
+    m_stack->addWidget(buildSearchPage());          // index 2
+    m_stack->addWidget(buildLyricsPage());          // index 3
+    m_stack->addWidget(buildArtistPage());          // index 4
+    m_stack->addWidget(buildChartsPage());          // index 5
+    m_stack->addWidget(buildPodcastsPage());        // index 6
+    m_stack->addWidget(buildPodcastEpisodesPage()); // index 7
 
     auto *split = new QSplitter(Qt::Horizontal);
     split->addWidget(m_sidebar);
@@ -349,11 +398,35 @@ void MainWindow::setupTray() {
 }
 
 void MainWindow::openSettings() {
-    SettingsDialog dlg(settingsPath(), this);
+    // Enumerate output devices (local hardware enumeration — not network) and the
+    // engine's currently selected device, then hand both to the dialog.
+    QVector<AudioDevice> devices;
+    QString curDevice;
+    if (m_loggedIn) {
+        const QJsonObject obj =
+            QJsonDocument::fromJson(takeJson(DZAudioDevicesJSON())).object();
+        for (const QJsonValue &v : obj.value("devices").toArray()) {
+            const QJsonObject d = v.toObject();
+            AudioDevice dev;
+            dev.id        = d.value("id").toString();
+            dev.name      = d.value("name").toString();
+            dev.isDefault = d.value("isDefault").toBool();
+            devices.push_back(dev);
+        }
+        if (char *c = DZCurrentAudioDevice()) {
+            curDevice = QString::fromUtf8(c);
+            DZFree(c);
+        }
+    }
+
+    SettingsDialog dlg(settingsPath(), devices, curDevice, this);
     connect(&dlg, &SettingsDialog::qualityChanged, this, &MainWindow::applyQuality);
     connect(&dlg, &SettingsDialog::replayGainChanged, this, &MainWindow::applyReplayGain);
     connect(&dlg, &SettingsDialog::closeToTrayChanged, this,
             [this](bool on) { m_closeToTray = on; });
+    connect(&dlg, &SettingsDialog::outputDeviceChanged, this, &MainWindow::applyAudioDevice);
+    connect(&dlg, &SettingsDialog::gaplessChanged, this, &MainWindow::applyGapless);
+    connect(&dlg, &SettingsDialog::crossfadeChanged, this, &MainWindow::applyCrossfade);
     dlg.exec();
 }
 
@@ -390,6 +463,38 @@ void MainWindow::applyReplayGain(bool on) {
     DZSetReplayGain(on ? 1 : 0);
     statusBar()->showMessage(on ? QStringLiteral("ReplayGain: on")
                                 : QStringLiteral("ReplayGain: off"), 3000);
+}
+
+// Switching the output device reinitialises the audio backend, which can briefly
+// block — do it off the GUI thread.
+void MainWindow::applyAudioDevice(const QString &deviceId) {
+    const QByteArray idb = deviceId.toUtf8();
+    QtConcurrent::run([this, idb] {
+        const int ok = DZSetAudioDevice(cstr(idb));
+        QMetaObject::invokeMethod(this, [this, ok] {
+            statusBar()->showMessage(ok ? QStringLiteral("Output device changed")
+                                        : QStringLiteral("Couldn't change output device"),
+                                     3000);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::applyGapless(bool on) {
+    m_gapless = on;
+    DZSetGapless(on ? 1 : 0);
+    statusBar()->showMessage(on ? QStringLiteral("Gapless: on")
+                                : QStringLiteral("Gapless: off"), 3000);
+    // Keep the next-track preload in sync with the new setting.
+    preloadNext();
+}
+
+void MainWindow::applyCrossfade(int ms) {
+    m_crossfadeMs = ms;
+    DZSetCrossfadeMS(ms);
+    statusBar()->showMessage(ms > 0
+        ? QStringLiteral("Crossfade: %1s").arg(ms / 1000)
+        : QStringLiteral("Crossfade: off"), 3000);
+    preloadNext();
 }
 
 void MainWindow::quitApp() {
@@ -453,10 +558,12 @@ void MainWindow::buildMenu() {
 void MainWindow::buildSidebar() {
     m_sidebar = new QListWidget;
     m_sidebar->setMaximumWidth(240);
-    m_sidebar->addItem(QStringLiteral("♥  Liked Songs"));
-    m_sidebar->addItem(QStringLiteral("☰  Playlists"));
-    m_sidebar->addItem(QStringLiteral("⌕  Search"));
-    m_sidebar->addItem(QStringLiteral("★  Charts"));
+    m_sidebar->addItem(QStringLiteral("♥  Liked Songs")); // 0
+    m_sidebar->addItem(QStringLiteral("⚡  Flow"));         // 1
+    m_sidebar->addItem(QStringLiteral("☰  Playlists"));    // 2
+    m_sidebar->addItem(QStringLiteral("⌕  Search"));       // 3
+    m_sidebar->addItem(QStringLiteral("★  Charts"));       // 4
+    m_sidebar->addItem(QStringLiteral("◉  Podcasts"));     // 5
     connect(m_sidebar, &QListWidget::currentRowChanged, this, &MainWindow::onSidebarChanged);
 }
 
@@ -467,17 +574,26 @@ void MainWindow::onSidebarChanged(int row) {
         loadFavorites();
         break;
     case 1:
+        m_stack->setCurrentIndex(0); // Flow loads into the shared track table
+        loadFlow();
+        break;
+    case 2:
         m_stack->setCurrentIndex(1);
         loadPlaylists();
         break;
-    case 2:
+    case 3:
         m_stack->setCurrentIndex(2);
         if (m_searchEdit)
             m_searchEdit->setFocus();
         break;
-    case 3:
-        m_stack->setCurrentIndex(0); // charts reuse the shared track table page
+    case 4:
+        m_stack->setCurrentIndex(5); // dedicated charts page
         loadCharts();
+        break;
+    case 5:
+        m_stack->setCurrentIndex(6); // podcasts shows page
+        if (m_podcastSearchEdit)
+            m_podcastSearchEdit->setFocus();
         break;
     default:
         break;
@@ -527,12 +643,19 @@ QWidget *MainWindow::buildTracksPage() {
 QWidget *MainWindow::buildPlaylistsPage() {
     auto *w = new QWidget;
     auto *v = new QVBoxLayout(w);
+
+    auto *head = new QHBoxLayout;
     auto *title = new QLabel("Your Playlists");
     QFont f = title->font();
     f.setPointSize(f.pointSize() + 6);
     f.setBold(true);
     title->setFont(f);
-    v->addWidget(title);
+    head->addWidget(title);
+    head->addStretch(1);
+    auto *newBtn = new QPushButton(QStringLiteral("＋ New Playlist"));
+    connect(newBtn, &QPushButton::clicked, this, &MainWindow::createPlaylist);
+    head->addWidget(newBtn);
+    v->addLayout(head);
 
     m_playlistGrid = new QListWidget;
     m_playlistGrid->setViewMode(QListView::IconMode);
@@ -546,6 +669,26 @@ QWidget *MainWindow::buildPlaylistsPage() {
         if (idx >= 0 && idx < m_playlists.size())
             openPlaylist(m_playlists[idx]);
     });
+    // Right-click: open / rename / delete a playlist.
+    m_playlistGrid->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_playlistGrid, &QWidget::customContextMenuRequested, this,
+            [this](const QPoint &pos) {
+                QListWidgetItem *it = m_playlistGrid->itemAt(pos);
+                if (!it)
+                    return;
+                const int idx = it->data(Qt::UserRole).toInt();
+                if (idx < 0 || idx >= m_playlists.size())
+                    return;
+                const Playlist p = m_playlists[idx];
+                QMenu menu(this);
+                QAction *open = menu.addAction(QStringLiteral("Open"));
+                QAction *ren  = menu.addAction(QStringLiteral("Rename…"));
+                QAction *del  = menu.addAction(QStringLiteral("Delete…"));
+                QAction *chosen = menu.exec(m_playlistGrid->viewport()->mapToGlobal(pos));
+                if (chosen == open)      openPlaylist(p);
+                else if (chosen == ren)  renamePlaylist(p);
+                else if (chosen == del)  deletePlaylist(p);
+            });
     v->addWidget(m_playlistGrid, 1);
     return w;
 }
@@ -624,6 +767,13 @@ QWidget *MainWindow::buildTransport() {
     artistBtn->setToolTip(QStringLiteral("Open the current track's artist"));
     connect(artistBtn, &QToolButton::clicked, this, &MainWindow::openArtistForCurrent);
     h->addWidget(artistBtn);
+
+    // Heart toggle: like/unlike the current track (DZAddFavorite/DZRemoveFavorite).
+    m_likeBtn = new QToolButton;
+    m_likeBtn->setAutoRaise(true);
+    connect(m_likeBtn, &QToolButton::clicked, this, &MainWindow::toggleLikeCurrent);
+    setLikeButton(false);
+    h->addWidget(m_likeBtn);
 
     m_prevBtn = mediaButton(style(), QStyle::SP_MediaSkipBackward);
     m_playBtn = mediaButton(style(), QStyle::SP_MediaPlay);
@@ -724,6 +874,17 @@ void MainWindow::startLogin() {
                 // the engine's actual state from DZReplayGain.
                 DZSetReplayGain(SettingsDialog::loadReplayGain(settingsPath()) ? 1 : 0);
                 m_replayGain = (DZReplayGain() != 0);
+                // Gapless / crossfade / output device: apply persisted prefs and
+                // mirror the engine's actual state back into the cached fields.
+                DZSetGapless(SettingsDialog::loadGapless(settingsPath()) ? 1 : 0);
+                m_gapless = (DZGapless() != 0);
+                DZSetCrossfadeMS(SettingsDialog::loadCrossfadeMs(settingsPath()));
+                m_crossfadeMs = DZCrossfadeMS();
+                const QString dev = SettingsDialog::loadOutputDevice(settingsPath());
+                if (!dev.isEmpty()) {
+                    const QByteArray db = dev.toUtf8();
+                    DZSetAudioDevice(cstr(db));
+                }
                 applyQuality(m_quality);     // apply persisted quality (+ entitlement note)
                 m_poll->start();
                 m_sidebar->setCurrentRow(0); // triggers loadFavorites()
@@ -746,32 +907,98 @@ void MainWindow::loadFavorites() {
     if (!m_loggedIn)
         return;
     m_tracksHeader->setText("Liked Songs");
+    m_currentPlaylistId.clear();
     statusBar()->showMessage("Loading liked songs…");
     QtConcurrent::run([this] {
         const QVector<Track> tracks = parseTracks(takeJson(DZFavoritesJSON()));
         QMetaObject::invokeMethod(this, [this, tracks] {
             const int gen = ++m_artGen;
             m_tableTracks = tracks;
+            // These are liked by definition — seed the local heart state.
+            for (const Track &t : tracks)
+                m_likedIds.insert(t.id);
+            refreshLikeButton();
             fillTrackTable(m_trackTable, tracks, gen);
             statusBar()->showMessage(QString("Liked Songs — %1 tracks").arg(tracks.size()), 3000);
         }, Qt::QueuedConnection);
     });
 }
 
-// Global top tracks (DZChartsJSON also carries albums/artists/playlists; this
-// view shows the tracks in the shared track table, mirroring loadFavorites()).
-void MainWindow::loadCharts() {
+// Flow: the user's personalised stream. Loads into the shared track table (like
+// Liked Songs) and starts playing from the top.
+void MainWindow::loadFlow() {
     if (!m_loggedIn)
         return;
-    m_tracksHeader->setText("Charts");
-    statusBar()->showMessage("Loading charts…");
+    m_tracksHeader->setText("Flow");
+    m_currentPlaylistId.clear();
+    statusBar()->showMessage("Loading Flow…");
     QtConcurrent::run([this] {
-        const QVector<Track> tracks = parseTracks(takeJson(DZChartsJSON()));
+        const QVector<Track> tracks = parseTracks(takeJson(DZFlowJSON()));
         QMetaObject::invokeMethod(this, [this, tracks] {
             const int gen = ++m_artGen;
             m_tableTracks = tracks;
             fillTrackTable(m_trackTable, tracks, gen);
-            statusBar()->showMessage(QString("Charts — %1 tracks").arg(tracks.size()), 3000);
+            statusBar()->showMessage(QString("Flow — %1 tracks").arg(tracks.size()), 3000);
+            if (!tracks.isEmpty())
+                playFrom(tracks, 0); // Flow auto-plays
+        }, Qt::QueuedConnection);
+    });
+}
+
+// Global charts: tracks fill the charts track table; albums, artists and
+// playlists fill the grid below (each tile opens its existing detail view).
+void MainWindow::loadCharts() {
+    if (!m_loggedIn)
+        return;
+    statusBar()->showMessage("Loading charts…");
+    QtConcurrent::run([this] {
+        const QByteArray j = takeJson(DZChartsJSON());
+        QMetaObject::invokeMethod(this, [this, j] {
+            const QJsonObject obj = QJsonDocument::fromJson(j).object();
+            const int gen = ++m_artGen;
+
+            m_chartsTracks.clear();
+            for (const QJsonValue &v : obj.value("tracks").toArray())
+                m_chartsTracks.push_back(parseTrack(v.toObject()));
+            fillTrackTable(m_chartsTrackTable, m_chartsTracks, gen);
+
+            m_chartsAlbums.clear();
+            m_chartsArtists.clear();
+            m_chartsPlaylists.clear();
+            for (const QJsonValue &v : obj.value("albums").toArray())
+                m_chartsAlbums.push_back(parseAlbum(v.toObject()));
+            for (const QJsonValue &v : obj.value("artists").toArray())
+                m_chartsArtists.push_back(parseArtistInfo(v.toObject()));
+            for (const QJsonValue &v : obj.value("playlists").toArray())
+                m_chartsPlaylists.push_back(parsePlaylist(v.toObject()));
+
+            // kind tags in UserRole: 0 album, 1 playlist, 2 artist.
+            m_chartsResults->clear();
+            auto addTile = [this, gen](const QString &text, const QString &art,
+                                       int kind, int idx) {
+                auto *it = new QListWidgetItem(QIcon(placeholderPix(110)), text);
+                it->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+                it->setData(Qt::UserRole, kind);
+                it->setData(Qt::UserRole + 1, idx);
+                m_chartsResults->addItem(it);
+                if (!art.isEmpty())
+                    fetchImage(art, gen, [it](const QImage &img) {
+                        it->setIcon(QIcon(QPixmap::fromImage(img).scaled(
+                            110, 110, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                    });
+            };
+            for (int i = 0; i < m_chartsAlbums.size(); ++i)
+                addTile(m_chartsAlbums[i].name + "\n" + m_chartsAlbums[i].artistLine,
+                        m_chartsAlbums[i].artworkUrl, 0, i);
+            for (int i = 0; i < m_chartsArtists.size(); ++i)
+                addTile(m_chartsArtists[i].name + "\n" + QStringLiteral("Artist"),
+                        m_chartsArtists[i].artworkUrl, 2, i);
+            for (int i = 0; i < m_chartsPlaylists.size(); ++i)
+                addTile(m_chartsPlaylists[i].name + "\n" + m_chartsPlaylists[i].owner,
+                        m_chartsPlaylists[i].artworkUrl, 1, i);
+
+            statusBar()->showMessage(
+                QString("Charts — %1 tracks").arg(m_chartsTracks.size()), 3000);
         }, Qt::QueuedConnection);
     });
 }
@@ -811,6 +1038,7 @@ void MainWindow::loadPlaylists() {
 void MainWindow::openPlaylist(const Playlist &p) {
     statusBar()->showMessage("Loading playlist…");
     m_tracksHeader->setText(p.owner.isEmpty() ? p.name : p.name + "   ·   " + p.owner);
+    m_currentPlaylistId = p.id; // enables "Remove from this playlist" in the track menu
     const QByteArray id = p.id.toUtf8();
     QtConcurrent::run([this, id] {
         const QVector<Track> tracks = parseTracks(takeJson(DZPlaylistTracksJSON(cstr(id))));
@@ -827,6 +1055,7 @@ void MainWindow::openPlaylist(const Playlist &p) {
 void MainWindow::openAlbum(const Album &a) {
     statusBar()->showMessage("Loading album…");
     m_tracksHeader->setText(a.artistLine.isEmpty() ? a.name : a.name + "   ·   " + a.artistLine);
+    m_currentPlaylistId.clear(); // album is not a removable-from playlist
     const QByteArray id = a.id.toUtf8();
     QtConcurrent::run([this, id] {
         const QVector<Track> tracks = parseTracks(takeJson(DZAlbumTracksJSON(cstr(id))));
@@ -898,10 +1127,262 @@ void MainWindow::runSearch() {
     });
 }
 
+// ---- favourites (like / unlike) -------------------------------------------
+
+// Paint the heart for the given liked state.
+void MainWindow::setLikeButton(bool liked) {
+    if (!m_likeBtn)
+        return;
+    m_likeBtn->setText(liked ? QString::fromUtf8("♥")   // ♥ filled
+                             : QString::fromUtf8("♡"));  // ♡ outline
+    m_likeBtn->setStyleSheet(liked ? QString("QToolButton{color:%1;}").arg(kAccent)
+                                   : QString());
+    m_likeBtn->setToolTip(liked ? QStringLiteral("Remove from Liked Songs")
+                                : QStringLiteral("Add to Liked Songs"));
+}
+
+// Refresh the heart from the local liked-state mirror for the current track.
+void MainWindow::refreshLikeButton() {
+    setLikeButton(m_hasCurrent && !m_currentIsEpisode &&
+                  m_likedIds.contains(m_current.id));
+}
+
+// Transport heart: like/unlike whatever is playing. No is-liked query exists, so
+// the intended state is shown immediately and reconciled from the result.
+void MainWindow::toggleLikeCurrent() {
+    if (!m_hasCurrent || m_current.id.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Nothing is playing"), 3000);
+        return;
+    }
+    if (m_currentIsEpisode) {
+        statusBar()->showMessage(QStringLiteral("Podcast episodes can't be liked"), 3000);
+        return;
+    }
+    const bool like = !m_likedIds.contains(m_current.id);
+    setLikeButton(like); // optimistic; reconciled by likeTrack's result
+    likeTrack(m_current.id, like);
+}
+
+// One-shot like/unlike on a worker; updates the local mirror + heart on success.
+void MainWindow::likeTrack(const QString &trackId, bool like) {
+    if (!m_loggedIn || trackId.isEmpty())
+        return;
+    const QByteArray idb = trackId.toUtf8();
+    QtConcurrent::run([this, idb, trackId, like] {
+        const int okRes = like ? DZAddFavorite(cstr(idb)) : DZRemoveFavorite(cstr(idb));
+        QMetaObject::invokeMethod(this, [this, okRes, trackId, like] {
+            if (okRes) {
+                if (like)
+                    m_likedIds.insert(trackId);
+                else
+                    m_likedIds.remove(trackId);
+                statusBar()->showMessage(like ? QStringLiteral("Added to Liked Songs")
+                                              : QStringLiteral("Removed from Liked Songs"),
+                                         3000);
+            } else {
+                statusBar()->showMessage(QStringLiteral("Couldn't update Liked Songs"), 3000);
+            }
+            if (m_hasCurrent && m_current.id == trackId)
+                refreshLikeButton(); // paint the true state (also reverts a failed toggle)
+        }, Qt::QueuedConnection);
+    });
+}
+
+// ---- add to playlist ------------------------------------------------------
+
+// Load the user's playlists (fresh) then show the picker on the GUI thread.
+void MainWindow::addTrackToPlaylist(const Track &t) {
+    if (!m_loggedIn || t.id.isEmpty())
+        return;
+    statusBar()->showMessage("Loading playlists…");
+    QtConcurrent::run([this, t] {
+        QVector<Playlist> ps;
+        const QJsonObject obj =
+            QJsonDocument::fromJson(takeJson(DZPlaylistsJSON())).object();
+        for (const QJsonValue &v : obj.value("playlists").toArray())
+            ps.push_back(parsePlaylist(v.toObject()));
+        QMetaObject::invokeMethod(this, [this, t, ps] {
+            statusBar()->clearMessage();
+            showAddToPlaylistPicker(t, ps);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::showAddToPlaylistPicker(const Track &t, const QVector<Playlist> &ps) {
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Add to Playlist"));
+    auto *v = new QVBoxLayout(&dlg);
+    v->addWidget(new QLabel(QStringLiteral("Add \"%1\" to:").arg(t.name)));
+    auto *list = new QListWidget;
+    auto *newItem = new QListWidgetItem(QStringLiteral("＋  New playlist…"));
+    newItem->setData(Qt::UserRole, -1);
+    list->addItem(newItem);
+    for (int i = 0; i < ps.size(); ++i) {
+        auto *it = new QListWidgetItem(ps[i].name);
+        it->setData(Qt::UserRole, i);
+        list->addItem(it);
+    }
+    list->setCurrentRow(0);
+    v->addWidget(list, 1);
+    auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    v->addWidget(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(list, &QListWidget::itemActivated, &dlg, &QDialog::accept);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+    QListWidgetItem *sel = list->currentItem();
+    if (!sel)
+        return;
+    const int idx = sel->data(Qt::UserRole).toInt();
+
+    if (idx < 0) {
+        // "New playlist…": prompt, create, then add the track to the new id.
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            this, QStringLiteral("New Playlist"), QStringLiteral("Playlist name:"),
+            QLineEdit::Normal, QString(), &ok).trimmed();
+        if (!ok || name.isEmpty())
+            return;
+        const QByteArray nb = name.toUtf8();
+        const QByteArray tid = t.id.toUtf8();
+        QtConcurrent::run([this, nb, tid, name] {
+            const QByteArray j = takeJson(DZCreatePlaylist(cstr(nb)));
+            const QString pid = QJsonDocument::fromJson(j).object().value("id").toString();
+            int added = 0;
+            if (!pid.isEmpty()) {
+                const QByteArray pidb = pid.toUtf8();
+                added = DZAddToPlaylist(cstr(pidb), cstr(tid));
+            }
+            QMetaObject::invokeMethod(this, [this, name, pid, added] {
+                if (pid.isEmpty())
+                    statusBar()->showMessage(QStringLiteral("Couldn't create playlist"), 3000);
+                else
+                    statusBar()->showMessage(added
+                        ? QStringLiteral("Added to new playlist \"%1\"").arg(name)
+                        : QStringLiteral("Created \"%1\" but couldn't add the track").arg(name),
+                        3000);
+            }, Qt::QueuedConnection);
+        });
+        return;
+    }
+
+    if (idx >= ps.size())
+        return;
+    const QString plName = ps[idx].name;
+    const QByteArray pid = ps[idx].id.toUtf8();
+    const QByteArray tid = t.id.toUtf8();
+    QtConcurrent::run([this, pid, tid, plName] {
+        const int added = DZAddToPlaylist(cstr(pid), cstr(tid));
+        QMetaObject::invokeMethod(this, [this, added, plName] {
+            statusBar()->showMessage(added
+                ? QStringLiteral("Added to \"%1\"").arg(plName)
+                : QStringLiteral("Couldn't add to \"%1\"").arg(plName), 3000);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::removeFromCurrentPlaylist(const Track &t, int row) {
+    if (m_currentPlaylistId.isEmpty() || t.id.isEmpty())
+        return;
+    const QString plid = m_currentPlaylistId;
+    const QByteArray pid = plid.toUtf8();
+    const QByteArray tid = t.id.toUtf8();
+    const QString tid2 = t.id;
+    QtConcurrent::run([this, pid, tid, plid, tid2, row] {
+        const int okRes = DZRemoveFromPlaylist(cstr(pid), cstr(tid));
+        QMetaObject::invokeMethod(this, [this, okRes, plid, tid2, row] {
+            if (!okRes) {
+                statusBar()->showMessage(QStringLiteral("Couldn't remove from playlist"), 3000);
+                return;
+            }
+            statusBar()->showMessage(QStringLiteral("Removed from playlist"), 3000);
+            // Drop the row locally if the table still shows this playlist + track.
+            if (m_currentPlaylistId == plid && row >= 0 && row < m_tableTracks.size() &&
+                m_tableTracks[row].id == tid2) {
+                m_tableTracks.removeAt(row);
+                const int gen = ++m_artGen;
+                fillTrackTable(m_trackTable, m_tableTracks, gen);
+            }
+        }, Qt::QueuedConnection);
+    });
+}
+
+// ---- playlist management (create / rename / delete) -----------------------
+
+void MainWindow::createPlaylist() {
+    if (!m_loggedIn)
+        return;
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("New Playlist"), QStringLiteral("Playlist name:"),
+        QLineEdit::Normal, QString(), &ok).trimmed();
+    if (!ok || name.isEmpty())
+        return;
+    const QByteArray nb = name.toUtf8();
+    QtConcurrent::run([this, nb, name] {
+        const QByteArray j = takeJson(DZCreatePlaylist(cstr(nb)));
+        const QString id = QJsonDocument::fromJson(j).object().value("id").toString();
+        QMetaObject::invokeMethod(this, [this, name, id] {
+            if (id.isEmpty()) {
+                statusBar()->showMessage(QStringLiteral("Couldn't create playlist"), 3000);
+            } else {
+                statusBar()->showMessage(QStringLiteral("Created \"%1\"").arg(name), 3000);
+                loadPlaylists(); // refresh the grid
+            }
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::renamePlaylist(const Playlist &p) {
+    if (!m_loggedIn || p.id.isEmpty())
+        return;
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("Rename Playlist"), QStringLiteral("New name:"),
+        QLineEdit::Normal, p.name, &ok).trimmed();
+    if (!ok || name.isEmpty() || name == p.name)
+        return;
+    const QByteArray idb = p.id.toUtf8();
+    const QByteArray nb = name.toUtf8();
+    QtConcurrent::run([this, idb, nb, name] {
+        const int okRes = DZRenamePlaylist(cstr(idb), cstr(nb));
+        QMetaObject::invokeMethod(this, [this, okRes, name] {
+            statusBar()->showMessage(okRes
+                ? QStringLiteral("Renamed to \"%1\"").arg(name)
+                : QStringLiteral("Couldn't rename playlist"), 3000);
+            if (okRes)
+                loadPlaylists();
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::deletePlaylist(const Playlist &p) {
+    if (!m_loggedIn || p.id.isEmpty())
+        return;
+    if (QMessageBox::question(this, QStringLiteral("Delete Playlist"),
+            QStringLiteral("Delete \"%1\"? This cannot be undone.").arg(p.name))
+        != QMessageBox::Yes)
+        return;
+    const QByteArray idb = p.id.toUtf8();
+    QtConcurrent::run([this, idb] {
+        const int okRes = DZDeletePlaylist(cstr(idb));
+        QMetaObject::invokeMethod(this, [this, okRes] {
+            statusBar()->showMessage(okRes ? QStringLiteral("Playlist deleted")
+                                           : QStringLiteral("Couldn't delete playlist"),
+                                     3000);
+            if (okRes)
+                loadPlaylists();
+        }, Qt::QueuedConnection);
+    });
+}
+
 // ---- lyrics + artist pages ------------------------------------------------
 
-// Right-click menu shared by every track table: jump to the row's artist or
-// show its lyrics. src points at the QVector backing the table's rows.
+// Right-click menu shared by every track table: jump to the row's artist, show
+// its lyrics, like it, or add it to a playlist. When the shared table is showing
+// a playlist, a "Remove from this playlist" entry appears too. src points at the
+// QVector backing the table's rows.
 void MainWindow::installTrackMenu(QTableWidget *table, QVector<Track> *src) {
     table->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(table, &QWidget::customContextMenuRequested, this,
@@ -914,19 +1395,32 @@ void MainWindow::installTrackMenu(QTableWidget *table, QVector<Track> *src) {
                 QAction *goArtist = menu.addAction(QStringLiteral("Go to Artist"));
                 goArtist->setEnabled(!t.artistId.isEmpty());
                 QAction *showLy = menu.addAction(QStringLiteral("Show Lyrics"));
+                menu.addSeparator();
+                QAction *like  = menu.addAction(QStringLiteral("Add to Liked Songs"));
+                QAction *addPl = menu.addAction(QStringLiteral("Add to Playlist…"));
+                QAction *removePl = nullptr;
+                if (table == m_trackTable && !m_currentPlaylistId.isEmpty())
+                    removePl = menu.addAction(QStringLiteral("Remove from this playlist"));
                 QAction *chosen = menu.exec(table->viewport()->mapToGlobal(pos));
                 if (chosen == goArtist)
                     openArtist(t.artistId);
                 else if (chosen == showLy)
                     openLyricsFor(t.id, t.name + QStringLiteral("   ·   ") + t.artistLine);
+                else if (chosen == like)
+                    likeTrack(t.id, true);
+                else if (chosen == addPl)
+                    addTrackToPlaylist(t);
+                else if (removePl && chosen == removePl)
+                    removeFromCurrentPlaylist(t, row);
             });
 }
 
-// Only the three browse pages (0..2) are valid "Back" targets — never another
-// detour page, so Back from lyrics/artist always lands somewhere sensible.
+// Only the browse pages — tracks(0), playlists(1), search(2), charts(5),
+// podcasts(6) — are valid "Back" targets, never another detour page, so Back
+// from lyrics/artist always lands somewhere sensible.
 void MainWindow::rememberReturnPage() {
     const int cur = m_stack->currentIndex();
-    if (cur >= 0 && cur <= 2)
+    if (cur == 0 || cur == 1 || cur == 2 || cur == 5 || cur == 6)
         m_returnPage = cur;
 }
 
@@ -1031,6 +1525,229 @@ QWidget *MainWindow::buildArtistPage() {
             });
     v->addWidget(m_artistRelatedGrid, 1);
     return w;
+}
+
+// ---- charts page ----------------------------------------------------------
+
+QWidget *MainWindow::buildChartsPage() {
+    auto *w = new QWidget;
+    auto *v = new QVBoxLayout(w);
+    auto *title = new QLabel(QStringLiteral("Charts"));
+    QFont f = title->font();
+    f.setPointSize(f.pointSize() + 6);
+    f.setBold(true);
+    title->setFont(f);
+    v->addWidget(title);
+
+    v->addWidget(new QLabel(QStringLiteral("Top Tracks")));
+    m_chartsTrackTable = makeTrackTable();
+    connect(m_chartsTrackTable, &QTableWidget::cellActivated, this,
+            [this](int row, int) { playFrom(m_chartsTracks, row); });
+    installTrackMenu(m_chartsTrackTable, &m_chartsTracks);
+    v->addWidget(m_chartsTrackTable, 2);
+
+    v->addWidget(new QLabel(QStringLiteral("Albums, Artists & Playlists")));
+    m_chartsResults = new QListWidget;
+    m_chartsResults->setViewMode(QListView::IconMode);
+    m_chartsResults->setIconSize(QSize(110, 110));
+    m_chartsResults->setGridSize(QSize(140, 165));
+    m_chartsResults->setResizeMode(QListView::Adjust);
+    m_chartsResults->setMovement(QListView::Static);
+    m_chartsResults->setWordWrap(true);
+    connect(m_chartsResults, &QListWidget::itemActivated, this, [this](QListWidgetItem *it) {
+        const int kind = it->data(Qt::UserRole).toInt();      // 0 album, 1 playlist, 2 artist
+        const int idx  = it->data(Qt::UserRole + 1).toInt();
+        if (kind == 0 && idx < m_chartsAlbums.size())
+            openAlbum(m_chartsAlbums[idx]);
+        else if (kind == 1 && idx < m_chartsPlaylists.size())
+            openPlaylist(m_chartsPlaylists[idx]);
+        else if (kind == 2 && idx < m_chartsArtists.size())
+            openArtist(m_chartsArtists[idx].id);
+    });
+    v->addWidget(m_chartsResults, 1);
+    return w;
+}
+
+// ---- podcasts pages -------------------------------------------------------
+
+QWidget *MainWindow::buildPodcastsPage() {
+    auto *w = new QWidget;
+    auto *v = new QVBoxLayout(w);
+    auto *title = new QLabel(QStringLiteral("Podcasts"));
+    QFont f = title->font();
+    f.setPointSize(f.pointSize() + 6);
+    f.setBold(true);
+    title->setFont(f);
+    v->addWidget(title);
+
+    auto *top = new QHBoxLayout;
+    m_podcastSearchEdit = new QLineEdit;
+    m_podcastSearchEdit->setPlaceholderText(QStringLiteral("Search podcasts…"));
+    auto *btn = new QPushButton(QStringLiteral("Search"));
+    top->addWidget(m_podcastSearchEdit, 1);
+    top->addWidget(btn);
+    v->addLayout(top);
+
+    m_podcastGrid = new QListWidget;
+    m_podcastGrid->setViewMode(QListView::IconMode);
+    m_podcastGrid->setIconSize(QSize(110, 110));
+    m_podcastGrid->setGridSize(QSize(150, 180));
+    m_podcastGrid->setResizeMode(QListView::Adjust);
+    m_podcastGrid->setMovement(QListView::Static);
+    m_podcastGrid->setWordWrap(true);
+    connect(m_podcastGrid, &QListWidget::itemActivated, this, [this](QListWidgetItem *it) {
+        const int idx = it->data(Qt::UserRole).toInt();
+        if (idx >= 0 && idx < m_podcasts.size())
+            openPodcast(m_podcasts[idx]);
+    });
+    v->addWidget(m_podcastGrid, 1);
+
+    connect(btn, &QPushButton::clicked, this, &MainWindow::runPodcastSearch);
+    connect(m_podcastSearchEdit, &QLineEdit::returnPressed, this, &MainWindow::runPodcastSearch);
+    return w;
+}
+
+QWidget *MainWindow::buildPodcastEpisodesPage() {
+    auto *w = new QWidget;
+    auto *v = new QVBoxLayout(w);
+
+    auto *top = new QHBoxLayout;
+    auto *back = new QToolButton;
+    back->setText(QStringLiteral("‹ Back"));
+    back->setAutoRaise(true);
+    connect(back, &QToolButton::clicked, this,
+            [this] { m_stack->setCurrentIndex(6); }); // back to the shows grid
+    top->addWidget(back);
+    m_podcastTitle = new QLabel(QStringLiteral("Episodes"));
+    QFont tf = m_podcastTitle->font();
+    tf.setPointSize(tf.pointSize() + 4);
+    tf.setBold(true);
+    m_podcastTitle->setFont(tf);
+    top->addWidget(m_podcastTitle, 1);
+    v->addLayout(top);
+
+    m_episodeList = new QListWidget;
+    m_episodeList->setIconSize(QSize(48, 48));
+    m_episodeList->setWordWrap(true);
+    m_episodeList->setSelectionMode(QAbstractItemView::SingleSelection);
+    connect(m_episodeList, &QListWidget::itemActivated, this, [this](QListWidgetItem *it) {
+        const int idx = it->data(Qt::UserRole).toInt();
+        if (idx >= 0 && idx < m_episodes.size())
+            playEpisode(m_episodes[idx]);
+    });
+    v->addWidget(m_episodeList, 1);
+    return w;
+}
+
+// ---- podcasts flow --------------------------------------------------------
+
+void MainWindow::runPodcastSearch() {
+    if (!m_loggedIn)
+        return;
+    const QString q = m_podcastSearchEdit->text().trimmed();
+    if (q.isEmpty())
+        return;
+    statusBar()->showMessage("Searching podcasts…");
+    const QByteArray qb = q.toUtf8();
+    QtConcurrent::run([this, qb] {
+        const QByteArray j = takeJson(DZSearchPodcastsJSON(cstr(qb)));
+        QMetaObject::invokeMethod(this, [this, j] {
+            const QJsonObject obj = QJsonDocument::fromJson(j).object();
+            const int gen = ++m_artGen;
+            m_podcasts.clear();
+            for (const QJsonValue &v : obj.value("podcasts").toArray())
+                m_podcasts.push_back(parsePodcast(v.toObject()));
+            m_podcastGrid->clear();
+            for (int i = 0; i < m_podcasts.size(); ++i) {
+                const Podcast &p = m_podcasts[i];
+                auto *it = new QListWidgetItem(
+                    QIcon(placeholderPix(110)),
+                    p.name + "\n" + QString::number(p.episodeCount) + " episodes");
+                it->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+                it->setData(Qt::UserRole, i);
+                m_podcastGrid->addItem(it);
+                if (!p.artworkUrl.isEmpty())
+                    fetchImage(p.artworkUrl, gen, [it](const QImage &img) {
+                        it->setIcon(QIcon(QPixmap::fromImage(img).scaled(
+                            110, 110, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                    });
+            }
+            statusBar()->showMessage(
+                QString("Found %1 podcasts").arg(m_podcasts.size()), 3000);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::openPodcast(const Podcast &p) {
+    m_currentPodcastName = p.name;
+    m_podcastTitle->setText(p.name);
+    m_stack->setCurrentIndex(7);
+    m_episodes.clear();
+    m_episodeList->clear();
+    m_episodeList->addItem(new QListWidgetItem(QStringLiteral("Loading episodes…")));
+    statusBar()->showMessage("Loading episodes…");
+    const QByteArray idb = p.id.toUtf8();
+    QtConcurrent::run([this, idb] {
+        const QByteArray j = takeJson(DZPodcastEpisodesJSON(cstr(idb)));
+        QMetaObject::invokeMethod(this, [this, j] {
+            const QJsonObject obj = QJsonDocument::fromJson(j).object();
+            const int gen = ++m_artGen;
+            m_episodes.clear();
+            for (const QJsonValue &v : obj.value("episodes").toArray())
+                m_episodes.push_back(parseEpisode(v.toObject()));
+            m_episodeList->clear();
+            for (int i = 0; i < m_episodes.size(); ++i) {
+                const Episode &e = m_episodes[i];
+                QString sub = e.releaseDate;
+                if (e.durationMs > 0) {
+                    if (!sub.isEmpty())
+                        sub += QStringLiteral("   ·   ");
+                    sub += timeText(e.durationMs);
+                }
+                auto *it = new QListWidgetItem(QIcon(placeholderPix(48)),
+                                               sub.isEmpty() ? e.title
+                                                             : e.title + "\n" + sub);
+                it->setData(Qt::UserRole, i);
+                m_episodeList->addItem(it);
+                if (!e.artworkUrl.isEmpty())
+                    fetchImage(e.artworkUrl, gen, [it](const QImage &img) {
+                        it->setIcon(QIcon(QPixmap::fromImage(img).scaled(
+                            48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                    });
+            }
+            if (m_episodes.isEmpty())
+                m_episodeList->addItem(new QListWidgetItem(QStringLiteral("No episodes.")));
+            statusBar()->showMessage(
+                QString("%1 episodes").arg(m_episodes.size()), 3000);
+        }, Qt::QueuedConnection);
+    });
+}
+
+// Episodes use the plain-stream path (DZPlayEpisode), not the encrypted track
+// pipeline, so they sit outside the queue: clearing it makes next/prev and
+// auto-advance no-ops while the episode plays.
+void MainWindow::playEpisode(const Episode &e) {
+    if (!m_loggedIn || e.id.isEmpty())
+        return;
+    m_queue.clear();
+    m_queueIndex = -1;
+    Track t;
+    t.id         = e.id;
+    t.name       = e.title;
+    t.artistLine = m_currentPodcastName;
+    t.artworkUrl = e.artworkUrl;
+    t.durationMs = e.durationMs;
+    m_current    = t;
+    m_hasCurrent = true;
+    m_currentIsEpisode = true;
+    setNowPlaying(t);
+    m_seek->setRange(0, static_cast<int>(qMax<qint64>(1, e.durationMs)));
+    m_seek->setValue(0);
+    m_posLabel->setText("0:00");
+    m_durLabel->setText(timeText(e.durationMs));
+    const QByteArray id = e.id.toUtf8();
+    const qint64 dur = e.durationMs;
+    QtConcurrent::run([id, dur] { DZPlayEpisode(cstr(id), dur); });
 }
 
 // ---- lyrics flow ----------------------------------------------------------
@@ -1336,6 +2053,7 @@ void MainWindow::playCurrent() {
     const Track t = m_queue[m_queueIndex];
     m_current = t;
     m_hasCurrent = true;
+    m_currentIsEpisode = false;
     setNowPlaying(t);
     m_seek->setRange(0, static_cast<int>(qMax<qint64>(1, t.durationMs)));
     m_seek->setValue(0);
@@ -1345,11 +2063,14 @@ void MainWindow::playCurrent() {
     const qint64 dur = t.durationMs;
     // DZPlay prepares the stream over the network — run it off the GUI thread.
     QtConcurrent::run([id, dur] { DZPlay(cstr(id), dur); });
+    // Gapless/crossfade: prime the engine with the deterministic next track.
+    preloadNext();
 }
 
 void MainWindow::setNowPlaying(const Track &t) {
     m_nowPlaying->setText(t.name + "\n" + t.artistLine);
     m_cover->setPixmap(placeholderPix(56));
+    refreshLikeButton(); // reflect liked state for the new track
 
     // Push the new track to the OS media overlay / lock-screen.
     if (m_mpris) {
@@ -1394,6 +2115,36 @@ void MainWindow::prev() {
     if (m_queueIndex > 0)
         m_queueIndex--;
     playCurrent();
+}
+
+// The next index that will play if nothing intervenes — linear next, or wrap to
+// 0 under repeat-all. Returns -1 when there is no deterministic next (shuffle,
+// repeat-one, or end of a non-repeating queue), in which case nothing is
+// preloaded and the engine won't gaplessly swap.
+int MainWindow::nextIndexDeterministic() const {
+    if (m_shuffle || m_repeat == 2 || m_queue.isEmpty())
+        return -1;
+    if (m_queueIndex + 1 < m_queue.size())
+        return m_queueIndex + 1;
+    if (m_repeat == 1)
+        return 0; // repeat-all wraps deterministically
+    return -1;
+}
+
+// Preload the deterministic next track so the engine can swap to it gaplessly /
+// with a crossfade when the current one ends. No-op unless that's enabled.
+void MainWindow::preloadNext() {
+    if (!autoTransitionEnabled())
+        return;
+    const int ni = nextIndexDeterministic();
+    if (ni < 0 || ni >= m_queue.size())
+        return;
+    const Track t = m_queue[ni];
+    if (t.id.isEmpty())
+        return;
+    const QByteArray id = t.id.toUtf8();
+    const qint64 dur = t.durationMs;
+    QtConcurrent::run([id, dur] { DZPreload(cstr(id), dur); });
 }
 
 void MainWindow::setVolume(int percent) {
@@ -1458,9 +2209,24 @@ void MainWindow::tick() {
     const int f = DZFinishedCount();
     if (f != m_lastFinished) {
         m_lastFinished = f;
-        if (m_repeat == 2)
+        const int ni = nextIndexDeterministic();
+        if (m_repeat == 2) {
             playCurrent(); // repeat-one
-        else
-            next();
+        } else if (autoTransitionEnabled() && ni >= 0 && DZState() == 2 /* Playing */) {
+            // The engine already swapped to the preloaded next track gaplessly /
+            // with a crossfade, so it is still playing. Advance the UI's queue
+            // pointer WITHOUT a fresh DZPlay, refresh the now-playing surfaces,
+            // and prime the track after this one.
+            m_queueIndex = ni;
+            m_current = m_queue[m_queueIndex];
+            m_hasCurrent = true;
+            m_currentIsEpisode = false;
+            setNowPlaying(m_current);
+            m_seek->setRange(0, static_cast<int>(qMax<qint64>(1, m_current.durationMs)));
+            m_durLabel->setText(timeText(m_current.durationMs));
+            preloadNext();
+        } else {
+            next(); // no preload (or engine stopped) — start the next normally
+        }
     }
 }

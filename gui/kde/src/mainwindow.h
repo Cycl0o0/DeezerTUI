@@ -13,6 +13,7 @@
 #include <QVector>
 #include <QThreadPool>
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <functional>
 
@@ -51,6 +52,16 @@ struct ArtistInfo {
     QString id, name, artworkUrl;
     int     nbFans = 0;
 };
+// jPodcast: {id,name,description,artworkUrl,episodeCount}.
+struct Podcast {
+    QString id, name, description, artworkUrl;
+    int     episodeCount = 0;
+};
+// jEpisode: {id,title,description,artworkUrl,durationMs,releaseDate}.
+struct Episode {
+    QString id, title, description, artworkUrl, releaseDate;
+    qint64  durationMs = 0;
+};
 // One timed line of synced lyrics ({timeMs,text}).
 struct LyricsLine {
     qint64  timeMs = 0;
@@ -80,11 +91,28 @@ private:
     QWidget      *buildSearchPage();
     QWidget      *buildLyricsPage();
     QWidget      *buildArtistPage();
+    QWidget      *buildChartsPage();
+    QWidget      *buildPodcastsPage();
+    QWidget      *buildPodcastEpisodesPage();
     QWidget      *buildTransport();
     QTableWidget *makeTrackTable();
-    // Right-click "Go to Artist" / "Show Lyrics" on any track table; src points
-    // at the QVector backing that table's rows.
+    // Right-click track menu: "Go to Artist" / "Show Lyrics" / "Add to Liked
+    // Songs" / "Add to Playlist…" (and "Remove from this playlist" when the
+    // shared table is showing a playlist); src points at the QVector backing
+    // that table's rows.
     void          installTrackMenu(QTableWidget *table, QVector<Track> *src);
+
+    // ---- favourites / playlists mutations (v0.4) ----
+    void toggleLikeCurrent();                              // heart on the transport
+    void likeTrack(const QString &trackId, bool like);    // one-shot like/unlike
+    void setLikeButton(bool liked);                       // paint the heart
+    void refreshLikeButton();                             // from m_likedIds + current
+    void addTrackToPlaylist(const Track &t);              // picker -> DZAddToPlaylist
+    void showAddToPlaylistPicker(const Track &t, const QVector<Playlist> &ps);
+    void removeFromCurrentPlaylist(const Track &t, int row);
+    void createPlaylist();                                // DZCreatePlaylist
+    void renamePlaylist(const Playlist &p);               // DZRenamePlaylist
+    void deletePlaylist(const Playlist &p);               // DZDeletePlaylist (confirm)
 
     // ---- lyrics view (stack page) ----
     void openLyrics();                                   // current track (transport)
@@ -106,11 +134,17 @@ private:
     void startLogin();
     void onSidebarChanged(int row);
     void loadFavorites();
+    void loadFlow();
     void loadCharts();
     void loadPlaylists();
     void openPlaylist(const Playlist &p);
     void openAlbum(const Album &a);
     void runSearch();
+
+    // ---- podcasts (v0.4) ----
+    void runPodcastSearch();
+    void openPodcast(const Podcast &p);
+    void playEpisode(const Episode &e);
 
     // ---- track table filling + async cover art ----
     void fillTrackTable(QTableWidget *table, const QVector<Track> &tracks, int gen);
@@ -125,6 +159,11 @@ private:
     void setVolume(int percent);
     void setNowPlaying(const Track &t);
     void tick();
+    // Gapless/crossfade: the deterministic (non-shuffle) next index, and a
+    // preload of that track so the engine can swap to it seamlessly on finish.
+    int  nextIndexDeterministic() const;
+    void preloadNext();
+    bool autoTransitionEnabled() const { return m_gapless || m_crossfadeMs > 0; }
 
     // ---- OS integration: MPRIS media controls, tray, settings ----
     void setupMpris();
@@ -133,6 +172,9 @@ private:
     void applyAccount(const QByteArray &json);
     void applyQuality(int level);
     void applyReplayGain(bool on);
+    void applyAudioDevice(const QString &deviceId);
+    void applyGapless(bool on);
+    void applyCrossfade(int ms);
     void quitApp();
     QString settingsPath() const;
 
@@ -158,7 +200,18 @@ private:
     QListWidget   *m_artistAlbumsGrid  = nullptr;
     QListWidget   *m_artistRelatedGrid = nullptr;
 
+    // charts page (tracks table + albums/artists/playlists grid)
+    QTableWidget  *m_chartsTrackTable = nullptr;
+    QListWidget   *m_chartsResults    = nullptr;
+
+    // podcasts pages
+    QLineEdit     *m_podcastSearchEdit = nullptr;
+    QListWidget   *m_podcastGrid       = nullptr;   // shows grid
+    QLabel        *m_podcastTitle      = nullptr;   // episodes page header
+    QListWidget   *m_episodeList       = nullptr;   // episodes of the open show
+
     QToolButton *m_prevBtn = nullptr, *m_playBtn = nullptr, *m_nextBtn = nullptr;
+    QToolButton *m_likeBtn = nullptr;
     QToolButton *m_shuffleBtn = nullptr, *m_repeatBtn = nullptr;
     QSlider     *m_seek = nullptr, *m_vol = nullptr;
     QLabel      *m_nowPlaying = nullptr, *m_cover = nullptr,
@@ -171,6 +224,23 @@ private:
     QVector<Album>    m_searchAlbums;
     QVector<Playlist> m_searchPlaylists;
     QVector<Playlist> m_playlists;
+
+    // charts data (backs m_chartsTrackTable + m_chartsResults)
+    QVector<Track>      m_chartsTracks;
+    QVector<Album>      m_chartsAlbums;
+    QVector<ArtistInfo> m_chartsArtists;
+    QVector<Playlist>   m_chartsPlaylists;
+
+    // podcasts data
+    QVector<Podcast> m_podcasts;
+    QVector<Episode> m_episodes;
+    QString          m_currentPodcastName;   // shown as the now-playing "artist"
+
+    // Liked-songs ids known to the UI. There is no is-liked query, so this is a
+    // best-effort local mirror: seeded from the Liked Songs view and updated on
+    // every like/unlike so the heart reflects state for known tracks.
+    QSet<QString> m_likedIds;
+    QString       m_currentPlaylistId;       // set while the shared table shows a playlist
 
     // lyrics state
     QHash<QString, LyricsData> m_lyricsCache;       // parsed lyrics, keyed by track id
@@ -193,6 +263,7 @@ private:
     int            m_queueIndex = -1;
     Track          m_current;
     bool           m_hasCurrent = false;
+    bool           m_currentIsEpisode = false; // podcast episode (plain-stream path)
 
     bool m_loggedIn   = false;
     bool m_seeking    = false;          // true while the user drags the seek slider
@@ -209,6 +280,8 @@ private:
     int              m_quality     = 0;         // 0 Normal, 1 High, 2 HiFi
     bool             m_replayGain  = false;     // loudness normalization (DZReplayGain)
     bool             m_closeToTray = true;      // honour close-to-tray setting
+    bool             m_gapless     = false;     // gapless playback (DZGapless)
+    int              m_crossfadeMs = 0;         // crossfade duration ms (DZCrossfadeMS)
 
     // ---- account tier (DZAccountJSON) ----
     QString m_accountName, m_accountOffer;      // shown in About / status bar
