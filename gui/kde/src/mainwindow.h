@@ -12,6 +12,7 @@
 #include <QMainWindow>
 #include <QVector>
 #include <QThreadPool>
+#include <QHash>
 #include <QString>
 #include <functional>
 
@@ -35,6 +36,7 @@ class MprisController;
 // Wire models — mirror the JSON emitted by corelib (jTrack/jAlbum/jPlaylist).
 struct Track {
     QString id, name, artistLine, albumName, artworkUrl;
+    QString artistId;            // jTrack.artists[0].id — drives the artist view
     qint64  durationMs = 0;
 };
 struct Album {
@@ -43,6 +45,22 @@ struct Album {
 struct Playlist {
     QString id, name, owner, artworkUrl;
     int     trackCount = 0;
+};
+// jArtistInfo: {id,name,artworkUrl,nbFans}.
+struct ArtistInfo {
+    QString id, name, artworkUrl;
+    int     nbFans = 0;
+};
+// One timed line of synced lyrics ({timeMs,text}).
+struct LyricsLine {
+    qint64  timeMs = 0;
+    QString text;
+};
+// DZLyricsJSON result: {plain, synced:[{timeMs,text}], isSynced}.
+struct LyricsData {
+    bool                isSynced = false;
+    QString             plain;
+    QVector<LyricsLine> lines;   // populated only when isSynced
 };
 
 class MainWindow : public QMainWindow {
@@ -60,8 +78,29 @@ private:
     QWidget      *buildTracksPage();
     QWidget      *buildPlaylistsPage();
     QWidget      *buildSearchPage();
+    QWidget      *buildLyricsPage();
+    QWidget      *buildArtistPage();
     QWidget      *buildTransport();
     QTableWidget *makeTrackTable();
+    // Right-click "Go to Artist" / "Show Lyrics" on any track table; src points
+    // at the QVector backing that table's rows.
+    void          installTrackMenu(QTableWidget *table, QVector<Track> *src);
+
+    // ---- lyrics view (stack page) ----
+    void openLyrics();                                   // current track (transport)
+    void openLyricsFor(const QString &trackId, const QString &title);
+    void loadLyrics(const QString &trackId, const QString &title);
+    void renderLyrics(const QString &trackId, const QString &title,
+                      const LyricsData &d);
+    void updateLyricsHighlight(qint64 posMs);
+
+    // ---- artist view (stack page) ----
+    void openArtistForCurrent();                         // current track's artist
+    void openArtist(const QString &artistId);
+    void renderArtist(const QByteArray &json, int gen);
+
+    // Remember the browse page to return to from a lyrics/artist detour.
+    void rememberReturnPage();
 
     // ---- flow / browse (all heavy work on a worker thread) ----
     void startLogin();
@@ -107,6 +146,18 @@ private:
     QTableWidget  *m_searchTrackTable = nullptr;
     QListWidget   *m_searchResults = nullptr;
 
+    // lyrics page
+    QLabel        *m_lyricsTitle   = nullptr;
+    QListWidget   *m_lyricsList    = nullptr;   // one item per line (synced or plain)
+
+    // artist page
+    QLabel        *m_artistName    = nullptr;
+    QLabel        *m_artistFans    = nullptr;
+    QLabel        *m_artistAvatar  = nullptr;
+    QTableWidget  *m_artistTopTable    = nullptr;
+    QListWidget   *m_artistAlbumsGrid  = nullptr;
+    QListWidget   *m_artistRelatedGrid = nullptr;
+
     QToolButton *m_prevBtn = nullptr, *m_playBtn = nullptr, *m_nextBtn = nullptr;
     QToolButton *m_shuffleBtn = nullptr, *m_repeatBtn = nullptr;
     QSlider     *m_seek = nullptr, *m_vol = nullptr;
@@ -120,6 +171,23 @@ private:
     QVector<Album>    m_searchAlbums;
     QVector<Playlist> m_searchPlaylists;
     QVector<Playlist> m_playlists;
+
+    // lyrics state
+    QHash<QString, LyricsData> m_lyricsCache;       // parsed lyrics, keyed by track id
+    QVector<qint64>            m_lyricsTimes;        // per-row start time (synced only)
+    QString m_lyricsShownId;        // track currently rendered in the lyrics page
+    QString m_lyricsRequestedId;    // most recent fetch target (guards re-fetch)
+    bool    m_lyricsIsSynced = false;
+    bool    m_lyricsFollowsPlayback = false; // auto-refetch when the track changes
+    int     m_lyricsActiveRow = -1;          // highlighted line, or -1
+    int     m_lyricsGen       = 0;           // guards async lyrics results
+
+    // artist state
+    QVector<Track>      m_artistTopTracks;
+    QVector<Album>      m_artistAlbums;
+    QVector<ArtistInfo> m_artistRelated;
+
+    int m_returnPage = 0;           // stack index to restore from lyrics/artist
 
     QVector<Track> m_queue;             // the playing queue
     int            m_queueIndex = -1;
