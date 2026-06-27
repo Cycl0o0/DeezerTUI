@@ -1,35 +1,33 @@
-# golangci-lint configuration for OpenDeezer.
+# golangci-lint v2 configuration for OpenDeezer.
+version: "2"
+
 run:
-  timeout: 5m
   build-tags:
     - linux
 
 linters:
   enable:
-    - govet
-    - staticcheck
     - errcheck
+    - govet
     - ineffassign
+    - staticcheck
     - unused
     - misspell
     - unconvert
     - gocritic
-
-linters-settings:
-  govet:
-    # The MPRIS D-Bus Seek method's signature is fixed by the spec/godbus and
-    # can't satisfy io.Seeker; disable just that analyzer (all others stay on).
-    disable:
-      - stdmethods
-  gocritic:
-    disabled-checks:
-      - ifElseChain
-      - singleCaseSwitch
-
-issues:
-  exclude-rules:
-    # cgo bridge intentionally ignores some errors at the C boundary.
-    - path: corelib/deezercore.go
-      linters: [errcheck]
-  max-issues-per-linter: 0
-  max-same-issues: 0
+  settings:
+    govet:
+      # The MPRIS D-Bus Seek method's signature is fixed by the spec/godbus and
+      # can't satisfy io.Seeker; disable just that analyzer (all others stay on).
+      disable:
+        - stdmethods
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - singleCaseSwitch
+  exclusions:
+    rules:
+      # The cgo bridge intentionally ignores some errors at the C boundary.
+      - path: corelib/deezercore.go
+        linters:
+          - errcheck
