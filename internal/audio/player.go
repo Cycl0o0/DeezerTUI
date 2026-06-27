@@ -73,6 +73,18 @@ type source struct {
 	eof    atomic.Bool  // decoder reached end and ring will not grow
 	seekTo atomic.Int64 // pending PCM-byte seek target, or -1
 	dead   atomic.Bool
+	errMsg atomic.Value // string: download/decode error, if any
+}
+
+func (s *source) setErr(err error) {
+	if err != nil {
+		s.errMsg.Store(err.Error())
+	}
+}
+
+func (s *source) lastErr() string {
+	v, _ := s.errMsg.Load().(string)
+	return v
 }
 
 // Player owns the malgo context + one output device and plays a current source,
@@ -134,9 +146,11 @@ func (p *Player) effectiveVolume() float64 {
 	return p.Volume() * f
 }
 
-// Gapless / crossfade configuration.
+// SetGapless enables/disables gapless transitions between tracks.
 func (p *Player) SetGapless(on bool) { p.gapless.Store(on) }
-func (p *Player) Gapless() bool      { return p.gapless.Load() }
+
+// Gapless reports whether gapless transitions are enabled.
+func (p *Player) Gapless() bool { return p.gapless.Load() }
 func (p *Player) SetCrossfadeMS(ms int) {
 	if ms < 0 {
 		ms = 0
@@ -161,7 +175,7 @@ func NewPlayer() (*Player, error) {
 	p.gapless.Store(true)
 	p.setVolume(1.0)
 	if err := p.initDevice(nil); err != nil {
-		ctx.Uninit()
+		_ = ctx.Uninit()
 		ctx.Free()
 		return nil, err
 	}
@@ -334,6 +348,9 @@ func (p *Player) manage() {
 				continue
 			}
 			if cur.eof.Load() && cur.ring.buffered() == 0 {
+				if e := cur.lastErr(); e != "" {
+					p.lastErr.Store(e)
+				}
 				if next != nil {
 					// Seamless swap to the preloaded next track.
 					p.mu.Lock()
@@ -433,11 +450,6 @@ func (p *Player) Close() {
 	}
 }
 
-func (p *Player) fail(err error) {
-	p.lastErr.Store(err.Error())
-	p.state.Store(int32(Errored))
-}
-
 // ---- source pipeline ----
 
 func newSource(plan *deezer.StreamPlan, durMS int64) *source {
@@ -457,12 +469,15 @@ func newSource(plan *deezer.StreamPlan, durMS int64) *source {
 func (s *source) download() {
 	resp, err := http.Get(s.plan.CDNURL)
 	if err != nil {
+		s.setErr(err)
 		s.sb.finish(err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		s.sb.finish(fmt.Errorf("CDN returned %s", resp.Status))
+		e := fmt.Errorf("CDN returned %s", resp.Status)
+		s.setErr(e)
+		s.sb.finish(e)
 		return
 	}
 	if !s.plan.Encrypted {
@@ -473,6 +488,9 @@ func (s *source) download() {
 				s.sb.append(buf[:n])
 			}
 			if err != nil {
+				if err != io.EOF {
+					s.setErr(err)
+				}
 				s.sb.finish(eofToNil(err))
 				return
 			}
@@ -484,6 +502,7 @@ func (s *source) download() {
 	}
 	dec, err := deezer.NewStripeDecryptor(s.plan.TrackID)
 	if err != nil {
+		s.setErr(err)
 		s.sb.finish(err)
 		return
 	}
@@ -499,6 +518,9 @@ func (s *source) download() {
 			out = dec.Finish(out[:0])
 			if len(out) > 0 {
 				s.sb.append(out)
+			}
+			if rerr != io.EOF {
+				s.setErr(rerr)
 			}
 			s.sb.finish(eofToNil(rerr))
 			return
@@ -528,6 +550,9 @@ func (s *source) decode() {
 		dec, err = mp3.NewDecoder(s.sb)
 	}
 	if err != nil {
+		if s.lastErr() == "" {
+			s.setErr(err)
+		}
 		s.eof.Store(true)
 		return
 	}
