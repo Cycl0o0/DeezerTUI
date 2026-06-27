@@ -3,7 +3,7 @@ import SwiftUI
 
 // Section is the sidebar selection.
 enum Section: Hashable {
-    case liked, playlists, search, charts
+    case liked, playlists, search, charts, flow, podcasts
 }
 
 enum RepeatMode: Int { case off, all, one }
@@ -32,12 +32,46 @@ final class AppState: ObservableObject {
     @Published var listTitle = "Liked Songs"
     @Published var listArtwork = ""              // hero artwork (empty => Liked gradient)
     @Published var listIsLiked = true            // hero style: gradient vs artwork
+    @Published var listHeroSymbol = "heart.fill" // glyph drawn on the gradient hero
     @Published var listSubtitle = ""
     @Published var playlists: [Playlist] = []
     @Published var searchTracks: [Track] = []
     @Published var searchAlbums: [Album] = []
+    @Published var searchArtists: [ArtistInfo] = []
     @Published var searchPlaylists: [Playlist] = []
     @Published var query = ""
+
+    // Liked-track ids — seeded from favorites, toggled locally for the heart UI.
+    // (No is-liked query exists; this is a best-effort local mirror.)
+    @Published var likedIDs: Set<String> = []
+
+    // Charts (DZChartsJSON): tracks drive the shared hero/track-list, the rest
+    // render as rails below.
+    @Published var chartAlbums: [Album] = []
+    @Published var chartArtists: [ArtistInfo] = []
+    @Published var chartPlaylists: [Playlist] = []
+
+    // Add-to-playlist picker (track action).
+    @Published var showAddToPlaylist = false
+    @Published var addTarget: Track?
+    @Published var pickerPlaylists: [Playlist] = []
+    @Published var pickerLoading = false
+
+    // Playlist management (create / rename / delete on the Playlists view).
+    @Published var showCreatePlaylist = false
+    @Published var renameTarget: Playlist?
+    @Published var deleteTarget: Playlist?
+
+    // Podcasts browse.
+    @Published var podcastQuery = ""
+    @Published var podcasts: [Podcast] = []
+    @Published var podcastEpisodes: [Episode] = []
+    @Published var openedPodcast: Podcast?
+    @Published var podcastsLoading = false
+
+    // Audio output devices (Settings).
+    @Published var audioDevices: [AudioDevice] = []
+    @Published var currentAudioDeviceID = ""
 
     // Lyrics sheet (current track's lyrics; synced highlight driven by `tick`).
     @Published var showLyrics = false
@@ -60,6 +94,7 @@ final class AppState: ObservableObject {
     @Published var volume: Double = 1
     @Published var shuffle = false
     @Published var repeatMode: RepeatMode = .off
+    @Published var playingEpisode = false   // current item is a podcast episode (standalone)
 
     private var queueIndex = 0
     private var lastFinished = 0
@@ -88,9 +123,12 @@ final class AppState: ObservableObject {
                     self.account = acct
                     self.volume = Core.volume
                     self.replayGain = Core.replayGain
-                    // Apply persisted audio quality, claim the OS Now Playing
-                    // slot's command handlers, and wire up the tray.
+                    // Apply persisted audio quality + gapless/crossfade, claim the
+                    // OS Now Playing command handlers, and wire up the tray.
                     Core.setQuality(self.settings.quality)
+                    Core.setGapless(self.settings.gapless)
+                    Core.setCrossfadeMS(self.settings.crossfadeMS)
+                    self.currentAudioDeviceID = Core.currentAudioDevice
                     self.nowPlaying.registerCommands(app: self)
                     self.tray.closeToTray = self.settings.closeToTray
                     self.tray.attach(app: self)
@@ -144,7 +182,16 @@ final class AppState: ObservableObject {
         listTitle = "Liked Songs"
         listArtwork = ""
         listIsLiked = true
-        runList { Core.favorites() }
+        listHeroSymbol = "heart.fill"
+        busy = true
+        Task.detached {
+            let ts = Core.favorites()
+            await MainActor.run {
+                self.tracks = ts
+                self.likedIDs = Set(ts.map { $0.id })   // seed the heart UI
+                self.busy = false
+            }
+        }
     }
     func loadPlaylists() {
         tracks = []                  // show the grid, not a stale track list
@@ -162,19 +209,45 @@ final class AppState: ObservableObject {
         listSubtitle = p.owner.isEmpty ? "Playlist" : "Playlist · \(p.owner)"
         runList { Core.playlistTracks(p.id) }
     }
-    // Global charts, rendered in the shared track-list screen.
+    // Global charts: tracks drive the shared hero/track-list; albums, artists and
+    // playlists render as rails below (see ChartsView).
     func loadCharts() {
         section = .charts
         listTitle = "Charts"
         listIsLiked = false
-        listSubtitle = "Top tracks worldwide"
+        listSubtitle = "Top worldwide"
         busy = true
         Task.detached {
-            let ts = Core.charts()?.tracks ?? []
+            let c = Core.charts()
+            await MainActor.run {
+                self.tracks = c?.tracks ?? []
+                self.chartAlbums = c?.albums ?? []
+                self.chartArtists = c?.artists ?? []
+                self.chartPlaylists = c?.playlists ?? []
+                self.listArtwork = self.tracks.first?.artworkUrl ?? ""
+                self.busy = false
+            }
+        }
+    }
+
+    // Flow: load the personalized stream and start playing immediately.
+    func loadFlow() {
+        section = .flow
+        listTitle = "Flow"
+        listArtwork = ""
+        listIsLiked = true            // gradient hero
+        listHeroSymbol = "infinity"
+        listSubtitle = "Your personal soundtrack"
+        busy = true
+        Task.detached {
+            let ts = Core.flow()
             await MainActor.run {
                 self.tracks = ts
-                self.listArtwork = ts.first?.artworkUrl ?? ""
                 self.busy = false
+                if let first = ts.first {
+                    self.shuffle = false
+                    self.play(first, in: ts)
+                }
             }
         }
     }
@@ -206,6 +279,7 @@ final class AppState: ObservableObject {
             await MainActor.run {
                 self.searchTracks = r?.tracks ?? []
                 self.searchAlbums = r?.albums ?? []
+                self.searchArtists = r?.artists ?? []
                 self.searchPlaylists = r?.playlists ?? []
                 self.busy = false
             }
@@ -280,6 +354,184 @@ final class AppState: ObservableObject {
         openAlbum(a)
     }
 
+    // Open an album from the Charts rails. Route to the shared track-list screen
+    // (the charts screen itself only renders chart data).
+    func openAlbumFromChart(_ a: Album) {
+        section = .playlists
+        openAlbum(a)
+    }
+
+    // MARK: likes
+
+    func isLiked(_ track: Track) -> Bool { likedIDs.contains(track.id) }
+    var isCurrentLiked: Bool {
+        guard let c = current, !playingEpisode else { return false }
+        return likedIDs.contains(c.id)
+    }
+
+    // One-shot like/unlike with optimistic local state (no is-liked query exists).
+    func toggleLike(_ track: Track) {
+        let id = track.id
+        if likedIDs.contains(id) {
+            likedIDs.remove(id)
+            Task.detached { Core.removeFavorite(id) }
+        } else {
+            likedIDs.insert(id)
+            Task.detached { Core.addFavorite(id) }
+        }
+    }
+    func toggleLikeCurrent() {
+        guard let c = current, !playingEpisode else { return }
+        toggleLike(c)
+    }
+
+    // MARK: add-to-playlist
+
+    func beginAddToPlaylist(_ track: Track) {
+        addTarget = track
+        pickerPlaylists = []
+        pickerLoading = true
+        showAddToPlaylist = true
+        Task.detached {
+            let ps = Core.playlists()
+            await MainActor.run {
+                self.pickerPlaylists = ps
+                self.pickerLoading = false
+            }
+        }
+    }
+    func addTargetTrack(toPlaylist playlistID: String) {
+        guard let t = addTarget else { return }
+        let tid = t.id
+        showAddToPlaylist = false
+        addTarget = nil
+        Task.detached { Core.addToPlaylist(playlistID, tid) }
+    }
+    func createPlaylistAndAddTarget(title: String) {
+        let name = title.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, let t = addTarget else { return }
+        let tid = t.id
+        showAddToPlaylist = false
+        addTarget = nil
+        Task.detached {
+            if let pid = Core.createPlaylist(name) { Core.addToPlaylist(pid, tid) }
+        }
+    }
+
+    // MARK: playlist management
+
+    func beginRename(_ p: Playlist) { renameTarget = p }
+
+    func createPlaylist(title: String) {
+        let name = title.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        busy = true
+        Task.detached {
+            _ = Core.createPlaylist(name)
+            let ps = Core.playlists()
+            await MainActor.run { self.playlists = ps; self.busy = false }
+        }
+    }
+    func renamePlaylist(_ p: Playlist, to title: String) {
+        let name = title.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let id = p.id
+        Task.detached {
+            Core.renamePlaylist(id, name)
+            let ps = Core.playlists()
+            await MainActor.run { self.playlists = ps }
+        }
+    }
+    func deletePlaylist(_ p: Playlist) {
+        let id = p.id
+        Task.detached {
+            Core.deletePlaylist(id)
+            let ps = Core.playlists()
+            await MainActor.run { self.playlists = ps }
+        }
+    }
+
+    // MARK: podcasts
+
+    func runPodcastSearch() {
+        let q = podcastQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return }
+        openedPodcast = nil
+        podcastEpisodes = []
+        podcastsLoading = true
+        Task.detached {
+            let ps = Core.searchPodcasts(q)
+            await MainActor.run {
+                self.podcasts = ps
+                self.podcastsLoading = false
+            }
+        }
+    }
+    func openPodcast(_ p: Podcast) {
+        openedPodcast = p
+        podcastEpisodes = []
+        podcastsLoading = true
+        Task.detached {
+            let eps = Core.podcastEpisodes(p.id)
+            await MainActor.run {
+                self.podcastEpisodes = eps
+                self.podcastsLoading = false
+            }
+        }
+    }
+    func closePodcast() { openedPodcast = nil; podcastEpisodes = [] }
+
+    // Play a podcast episode via the plain-stream path. Episodes are standalone
+    // (not part of the music queue), so the finished-count handler stops rather
+    // than advancing into `tracks`.
+    func playEpisode(_ e: Episode) {
+        playingEpisode = true
+        let t = Track(id: e.id, name: e.title, durationMs: e.durationMs,
+                      artists: [], artistLine: openedPodcast?.name ?? "Podcast",
+                      albumName: openedPodcast?.name ?? "", artworkUrl: e.artworkUrl)
+        current = t
+        durationMs = e.durationMs
+        positionMs = 0
+        lastState = .loading
+        nowPlaying.update(track: t, state: .loading, positionMs: 0, durationMs: e.durationMs)
+        let id = e.id, dur = e.durationMs
+        Task.detached { Core.playEpisode(id, durationMs: dur) }
+    }
+
+    // MARK: audio output devices
+
+    func loadAudioDevices() {
+        Task.detached {
+            let devs = Core.audioDevices()
+            let cur = Core.currentAudioDevice
+            await MainActor.run {
+                self.audioDevices = devs
+                self.currentAudioDeviceID = cur
+            }
+        }
+    }
+    func setAudioDevice(_ id: String) {
+        currentAudioDeviceID = id
+        Task.detached { Core.setAudioDevice(id) }
+    }
+
+    // MARK: gapless / crossfade (persisted + applied to the engine)
+
+    func setGapless(_ on: Bool) {
+        settings.gapless = on
+        Core.setGapless(on)
+        settings.save()
+    }
+    func setCrossfadeMS(_ ms: Int) {
+        settings.crossfadeMS = ms
+        Core.setCrossfadeMS(ms)
+        settings.save()
+    }
+
+    // True when the engine performs a seamless swap (gapless or crossfade);
+    // gates next-track preloading and the no-replay UI advance.
+    private var seamless: Bool { settings.gapless || settings.crossfadeMS > 0 }
+
     // MARK: playback
 
     func play(_ track: Track, in list: [Track]) {
@@ -290,6 +542,7 @@ final class AppState: ObservableObject {
 
     private func playCurrent() {
         guard queueIndex >= 0, queueIndex < tracks.count else { return }
+        playingEpisode = false
         let t = tracks[queueIndex]
         current = t
         durationMs = t.durationMs
@@ -297,7 +550,27 @@ final class AppState: ObservableObject {
         lastState = .loading
         // Push the new track to the OS Now Playing surface immediately.
         nowPlaying.update(track: t, state: .loading, positionMs: 0, durationMs: t.durationMs)
-        Task.detached { Core.play(t.id, durationMs: t.durationMs) }
+        // Preload the deterministic next track so the engine can swap seamlessly.
+        let next = nextTrackForPreload()
+        Task.detached {
+            Core.play(t.id, durationMs: t.durationMs)
+            if let n = next { Core.preload(n.id, durationMs: n.durationMs) }
+        }
+    }
+
+    // The next index the queue will advance to deterministically (nil if none, or
+    // when shuffle / repeat-one make it non-deterministic).
+    private func deterministicNextIndex() -> Int? {
+        guard !tracks.isEmpty, !shuffle, repeatMode != .one else { return nil }
+        if queueIndex + 1 < tracks.count { return queueIndex + 1 }
+        if repeatMode == .all { return 0 }
+        return nil
+    }
+
+    // The track to preload for a seamless transition, or nil when not applicable.
+    private func nextTrackForPreload() -> Track? {
+        guard seamless, !playingEpisode, let n = deterministicNextIndex() else { return nil }
+        return tracks[n]
     }
 
     func togglePause() { Core.togglePause() }
@@ -384,7 +657,32 @@ final class AppState: ObservableObject {
         let f = Core.finishedCount
         if f != lastFinished {
             lastFinished = f
-            if repeatMode == .one { playCurrent() } else { next() }
+            handleAdvance()
+        }
+    }
+
+    // Decide what to do when the engine reports a track finished.
+    private func handleAdvance() {
+        // Episodes are standalone: stop at the end rather than entering the queue.
+        if playingEpisode { return }
+        if repeatMode == .one { playCurrent(); return }
+        // If a seamless transition was armed and the engine is STILL playing, it
+        // already swapped to the preloaded next track. Advance the UI's queue
+        // pointer WITHOUT re-issuing DZPlay, refresh now-playing, and preload the
+        // new next. Otherwise fall back to an explicit play of the next track.
+        if seamless, let n = deterministicNextIndex(), Core.state == .playing {
+            queueIndex = n
+            let t = tracks[queueIndex]
+            current = t
+            durationMs = t.durationMs
+            positionMs = 0
+            lastState = .playing
+            nowPlaying.update(track: t, state: .playing, positionMs: 0, durationMs: t.durationMs)
+            if let next = nextTrackForPreload() {
+                Task.detached { Core.preload(next.id, durationMs: next.durationMs) }
+            }
+        } else {
+            next()
         }
     }
 }

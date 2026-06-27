@@ -49,6 +49,7 @@ struct RootView: View {
         .sheet(isPresented: $app.showSettings) { SettingsView() }
         .sheet(isPresented: $app.showLyrics) { LyricsView() }
         .sheet(isPresented: $app.showArtist) { ArtistView() }
+        .sheet(isPresented: $app.showAddToPlaylist) { AddToPlaylistSheet() }
     }
 }
 
@@ -86,15 +87,18 @@ struct Sidebar: View {
                     case .liked: app.loadFavorites()
                     case .playlists: app.loadPlaylists()
                     case .charts: app.loadCharts()
-                    case .search: break
+                    case .flow: app.loadFlow()
+                    case .search, .podcasts: break
                     }
                 })) {
                 SidebarLabel("Search", "magnifyingglass", .search)
 
                 SwiftUI.Section {
+                    SidebarLabel("Flow", "infinity", .flow)
                     SidebarLabel("Liked Songs", "heart.fill", .liked)
                     SidebarLabel("Playlists", "music.note.list", .playlists)
                     SidebarLabel("Charts", "chart.bar.fill", .charts)
+                    SidebarLabel("Podcasts", "mic.fill", .podcasts)
                 } header: {
                     Text("Library")
                         .font(.system(size: 11, weight: .bold)).textCase(.uppercase)
@@ -216,8 +220,10 @@ struct DetailView: View {
     var body: some View {
         Group {
             switch app.section {
-            case .liked, .charts:
+            case .liked, .flow:
                 TrackListScreen()
+            case .charts:
+                ChartsView()
             case .playlists:
                 if app.tracks.isEmpty {
                     PlaylistGrid(playlists: app.playlists) { app.openPlaylist($0) }
@@ -226,6 +232,8 @@ struct DetailView: View {
                 }
             case .search:
                 SearchView()
+            case .podcasts:
+                PodcastsView()
             }
         }
         .background(DZ.windowBG)
@@ -316,7 +324,7 @@ struct HeroHeader: View {
                 .fill(LinearGradient(colors: [DZ.accent, DZ.accentMag],
                                      startPoint: .top, endPoint: .bottom))
                 .frame(width: 168, height: 168)
-                .overlay(Image(systemName: "heart.fill").font(.system(size: 56)).foregroundStyle(.white))
+                .overlay(Image(systemName: app.listHeroSymbol).font(.system(size: 56)).foregroundStyle(.white))
                 .shadow(radius: 18, y: 8)
         } else {
             Artwork(url: app.listArtwork, size: 168, radius: 10)
@@ -397,6 +405,13 @@ struct TrackRowView: View {
         .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hover = h } }
         .contextMenu {
             Button { onPlay() } label: { Label("Play", systemImage: "play.fill") }
+            Button { app.toggleLike(track) } label: {
+                Label(app.isLiked(track) ? "Unlike" : "Like",
+                      systemImage: app.isLiked(track) ? "heart.fill" : "heart")
+            }
+            Button { app.beginAddToPlaylist(track) } label: {
+                Label("Add to Playlist…", systemImage: "text.badge.plus")
+            }
             if let aid = track.artists.first?.id {
                 Button { app.openArtist(aid) } label: {
                     Label("Go to Artist", systemImage: "music.mic")
@@ -409,16 +424,29 @@ struct TrackRowView: View {
 // MARK: - Library grid
 
 struct PlaylistGrid: View {
+    @EnvironmentObject var app: AppState
     let playlists: [Playlist]
     let onOpen: (Playlist) -> Void
     private let cols = [GridItem(.adaptive(minimum: 170, maximum: 200), spacing: 20)]
 
+    // Text buffers for the create / rename prompts.
+    @State private var createText = ""
+    @State private var renameText = ""
+
     var body: some View {
         ScrollView {
-            Text("Playlists").font(.system(size: 26, weight: .bold))
-                .foregroundStyle(DZ.textPri)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 24).padding(.top, 20)
+            HStack {
+                Text("Playlists").font(.system(size: 26, weight: .bold))
+                    .foregroundStyle(DZ.textPri)
+                Spacer()
+                Button { createText = ""; app.showCreatePlaylist = true } label: {
+                    Label("New Playlist", systemImage: "plus")
+                }
+                .buttonStyle(.glass).tint(DZ.accent)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 24).padding(.top, 20)
+
             LazyVGrid(columns: cols, spacing: 24) {
                 ForEach(playlists) { p in
                     PlaylistCard(playlist: p) { onOpen(p) }
@@ -428,10 +456,43 @@ struct PlaylistGrid: View {
         }
         .scrollContentBackground(.hidden)
         .background(DZ.windowBG)
+        // Create
+        .alert("New Playlist", isPresented: $app.showCreatePlaylist) {
+            TextField("Playlist name", text: $createText)
+            Button("Create") { app.createPlaylist(title: createText) }
+                .disabled(createText.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel", role: .cancel) {}
+        } message: { Text("Name your new playlist.") }
+        // Rename
+        .alert("Rename Playlist",
+               isPresented: Binding(get: { app.renameTarget != nil },
+                                    set: { if !$0 { app.renameTarget = nil } })) {
+            TextField("Playlist name", text: $renameText)
+            Button("Save") {
+                if let p = app.renameTarget { app.renamePlaylist(p, to: renameText) }
+                app.renameTarget = nil
+            }
+            .disabled(renameText.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel", role: .cancel) { app.renameTarget = nil }
+        } message: { Text("Enter a new name.") }
+        .onChange(of: app.renameTarget) { _, p in renameText = p?.name ?? "" }
+        // Delete (confirm)
+        .confirmationDialog(
+            "Delete \u{201C}\(app.deleteTarget?.name ?? "")\u{201D}?",
+            isPresented: Binding(get: { app.deleteTarget != nil },
+                                 set: { if !$0 { app.deleteTarget = nil } }),
+            titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                if let p = app.deleteTarget { app.deletePlaylist(p) }
+                app.deleteTarget = nil
+            }
+            Button("Cancel", role: .cancel) { app.deleteTarget = nil }
+        } message: { Text("This can't be undone.") }
     }
 }
 
 struct PlaylistCard: View {
+    @EnvironmentObject var app: AppState
     let playlist: Playlist
     let onOpen: () -> Void
     @State private var hover = false
@@ -457,6 +518,13 @@ struct PlaylistCard: View {
         .buttonStyle(.plain)
         .scaleEffect(hover ? 1.03 : 1)
         .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hover = h } }
+        .contextMenu {
+            Button { onOpen() } label: { Label("Open", systemImage: "play.fill") }
+            Button { app.beginRename(playlist) } label: { Label("Rename…", systemImage: "pencil") }
+            Button(role: .destructive) { app.deleteTarget = playlist } label: {
+                Label("Delete…", systemImage: "trash")
+            }
+        }
     }
 }
 
@@ -486,6 +554,16 @@ struct SearchView: View {
                             }
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
+                        }
+                    }
+                }
+                if !app.searchArtists.isEmpty {
+                    searchSection("Artists") {
+                        ForEach(app.searchArtists) { ar in
+                            CompactRow(url: ar.artworkUrl, title: ar.name,
+                                       sub: ar.nbFans > 0 ? "\(ar.nbFans.formatted()) fans" : "Artist") {
+                                app.openArtist(ar.id)
+                            }
                         }
                     }
                 }

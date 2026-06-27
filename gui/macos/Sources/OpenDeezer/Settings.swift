@@ -8,6 +8,23 @@ struct AppSettings: Codable {
     // Keep playing in background: closing the window hides to the tray instead
     // of quitting.
     var closeToTray: Bool = true
+    // Gapless playback (engine swaps preloaded tracks with no silence).
+    var gapless: Bool = true
+    // Crossfade duration in ms (0 = off). Applied to the engine on launch.
+    var crossfadeMS: Int = 0
+
+    enum CodingKeys: String, CodingKey { case quality, closeToTray, gapless, crossfadeMS }
+
+    init() {}
+
+    // Tolerant decode so older settings.json files (without the v0.4 keys) load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        quality = try c.decodeIfPresent(Int.self, forKey: .quality) ?? 1
+        closeToTray = try c.decodeIfPresent(Bool.self, forKey: .closeToTray) ?? true
+        gapless = try c.decodeIfPresent(Bool.self, forKey: .gapless) ?? true
+        crossfadeMS = try c.decodeIfPresent(Int.self, forKey: .crossfadeMS) ?? 0
+    }
 
     static var configDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -50,6 +67,8 @@ struct SettingsView: View {
             }
             .padding(.bottom, 18)
 
+            ScrollView {
+              VStack(alignment: .leading, spacing: 0) {
             // Audio quality
             settingsCard {
                 VStack(alignment: .leading, spacing: 10) {
@@ -70,6 +89,64 @@ struct SettingsView: View {
                         Label(note, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(DZ.accentMag)
                     }
+                }
+            }
+
+            // Output device
+            settingsCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Output Device", systemImage: "hifispeaker.fill")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(DZ.textPri)
+                    Picker("", selection: Binding(
+                        get: { app.currentAudioDeviceID },
+                        set: { app.setAudioDevice($0) })) {
+                        // The engine reports "" as the system default device.
+                        if !app.audioDevices.contains(where: { $0.id == app.currentAudioDeviceID }) {
+                            Text("System Default").tag(app.currentAudioDeviceID)
+                        }
+                        ForEach(app.audioDevices) { d in
+                            Text(d.isDefault ? "\(d.name) (System Default)" : d.name).tag(d.id)
+                        }
+                    }
+                    .labelsHidden()
+                    Text("Choose where audio plays. Switching takes effect on the next track or seek.")
+                        .font(.caption).foregroundStyle(DZ.textSec)
+                }
+            }
+
+            // Gapless playback
+            settingsCard {
+                Toggle(isOn: Binding(
+                    get: { app.settings.gapless },
+                    set: { app.setGapless($0) })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Gapless playback", systemImage: "forward.end.alt.fill")
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(DZ.textPri)
+                        Text("Preloads the next track so albums play with no silence between songs.")
+                            .font(.caption).foregroundStyle(DZ.textSec)
+                    }
+                }
+                .toggleStyle(.switch)
+                .tint(DZ.accent)
+            }
+
+            // Crossfade
+            settingsCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Crossfade", systemImage: "wave.3.forward")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(DZ.textPri)
+                    Picker("", selection: Binding(
+                        get: { app.settings.crossfadeMS },
+                        set: { app.setCrossfadeMS($0) })) {
+                        Text("Off").tag(0)
+                        Text("3s").tag(3000)
+                        Text("6s").tag(6000)
+                        Text("12s").tag(12000)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text("Fades the end of one track into the start of the next.")
+                        .font(.caption).foregroundStyle(DZ.textSec)
                 }
             }
 
@@ -104,6 +181,9 @@ struct SettingsView: View {
                 .toggleStyle(.switch)
                 .tint(DZ.accent)
             }
+              }
+            }
+            .scrollContentBackground(.hidden)
 
             HStack {
                 Text("Stored in ~/.config/opendeezer/settings.json")
@@ -115,8 +195,9 @@ struct SettingsView: View {
             .padding(.top, 18)
         }
         .padding(24)
-        .frame(width: 440)
+        .frame(width: 440, height: 620)
         .background(DZ.windowBG)
+        .onAppear { app.loadAudioDevices() }
     }
 
     @ViewBuilder

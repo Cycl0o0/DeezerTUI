@@ -46,8 +46,45 @@ struct SearchResponse: Codable {
     let tracks: [Track]
     let albums: [Album]
     let playlists: [Playlist]
+    // Artist entities (jArtistInfo). Optional/tolerant: the current engine's
+    // DZSearchJSON omits them, so the UI hides the Artists section when empty.
+    let artists: [ArtistInfo]?
 }
 struct ErrorResponse: Codable { let error: String }
+
+// Result of DZCreatePlaylist ({"id":"..."}).
+struct CreatedPlaylist: Codable { let id: String }
+
+// Podcast show (DZSearchPodcastsJSON).
+struct Podcast: Codable, Hashable, Identifiable {
+    let id: String
+    let name: String
+    let description: String
+    let artworkUrl: String
+    let episodeCount: Int
+}
+struct PodcastsResponse: Codable { let podcasts: [Podcast] }
+
+// Podcast episode (DZPodcastEpisodesJSON). Played via the plain-stream path.
+struct Episode: Codable, Hashable, Identifiable {
+    let id: String
+    let title: String
+    let description: String
+    let artworkUrl: String
+    let durationMs: Int64
+    let releaseDate: String
+
+    var durationText: String { Track.timeText(durationMs) }
+}
+struct EpisodesResponse: Codable { let episodes: [Episode] }
+
+// Audio output device (DZAudioDevicesJSON). id "" == system default.
+struct AudioDevice: Codable, Hashable, Identifiable {
+    let id: String
+    let name: String
+    let isDefault: Bool
+}
+struct AudioDevicesResponse: Codable { let devices: [AudioDevice] }
 
 // Account tier + entitlements (DZAccountJSON).
 struct Account: Codable {
