@@ -40,7 +40,7 @@ struct AddToPlaylistSheet: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
-                Section {
+                SwiftUI.Section {
                     Button { withAnimation { creating.toggle() } } label: {
                         Label("New playlist…", systemImage: "plus.circle.fill")
                             .foregroundStyle(DZ.accent)
@@ -61,7 +61,7 @@ struct AddToPlaylistSheet: View {
                     }
                 }
 
-                Section {
+                SwiftUI.Section {
                     ForEach(app.pickerPlaylists) { p in
                         Button { app.addTargetTrack(toPlaylist: p.id) } label: {
                             HStack(spacing: 10) {
