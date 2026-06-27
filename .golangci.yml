@@ -1,0 +1,30 @@
+# golangci-lint configuration for OpenDeezer.
+run:
+  timeout: 5m
+  build-tags:
+    - linux
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - misspell
+    - unconvert
+    - gocritic
+
+linters-settings:
+  gocritic:
+    disabled-checks:
+      - ifElseChain
+      - singleCaseSwitch
+
+issues:
+  exclude-rules:
+    # cgo bridge intentionally ignores some errors at the C boundary.
+    - path: corelib/deezercore.go
+      linters: [errcheck]
+  max-issues-per-linter: 0
+  max-same-issues: 0
