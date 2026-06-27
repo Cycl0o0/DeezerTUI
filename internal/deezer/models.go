@@ -35,6 +35,46 @@ type Album struct {
 	ArtworkURL string
 }
 
+// ArtistInfo is an artist profile (search result / browse target).
+type ArtistInfo struct {
+	ID         string
+	Name       string
+	ArtworkURL string
+	NbFans     int
+}
+
+// ArtistPage bundles an artist's profile with their top tracks, albums and
+// related artists for a one-shot profile view.
+type ArtistPage struct {
+	Artist  ArtistInfo
+	Top     []Track
+	Albums  []Album
+	Related []ArtistInfo
+}
+
+// LyricLine is one synced lyric line (TimeMS is the line's start offset).
+type LyricLine struct {
+	TimeMS int64
+	Text   string
+}
+
+// Lyrics holds a track's plain text plus, when available, time-synced lines.
+type Lyrics struct {
+	Plain  string
+	Synced []LyricLine
+}
+
+// IsSynced reports whether time-synced lyrics are present.
+func (l Lyrics) IsSynced() bool { return len(l.Synced) > 0 }
+
+// Chart is the global/genre top lists from the public REST /chart endpoint.
+type Chart struct {
+	Tracks    []Track
+	Albums    []Album
+	Artists   []ArtistInfo
+	Playlists []Playlist
+}
+
 // Playlist is a search/browse result.
 type Playlist struct {
 	ID         string
@@ -44,10 +84,11 @@ type Playlist struct {
 	ArtworkURL string
 }
 
-// SearchResults groups the three searched entity kinds.
+// SearchResults groups the searched entity kinds.
 type SearchResults struct {
 	Tracks    []Track
 	Albums    []Album
+	Artists   []ArtistInfo
 	Playlists []Playlist
 }
 

@@ -7,16 +7,18 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
+	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
 	"github.com/Cycl0o0/OpenDeezer/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
-var version = "dev"
+var version = "0.3.0"
 
 func main() {
 	saveARL := flag.String("save-arl", "", "save this ARL to ~/.config/opendeezer/arl.txt and exit")
@@ -36,6 +38,15 @@ func main() {
 		fmt.Println("ARL saved.")
 		return
 	}
+
+	// File logging (level via $OPENDEEZER_LOG); never writes to stdout, so the
+	// TUI is unaffected. Best-effort: discards on failure. The log file is held
+	// open for the process lifetime and released by the OS on exit (some paths
+	// below call os.Exit, which would skip a deferred Close anyway).
+	if base, err := os.UserConfigDir(); err == nil {
+		_, _ = odlog.OpenFile(filepath.Join(base, "opendeezer"))
+	}
+	odlog.Info("opendeezer %s starting", version)
 
 	arl := ui.LoadARL()
 	if arl == "" {

@@ -95,6 +95,14 @@ extern "C" {
     int            DZHighQuality(void);               // 1 if at least MP3_320
     int            DZQuality(void);                   // current level 0..2
     char*          DZFormat(void);                    // human label of current stream
+    // ---- v0.3 additions -----------------------------------------------------
+    char*          DZAccountJSON(void);               // {userId,name,offer,canHq,canHifi,loggedIn}
+    char*          DZChartsJSON(void);                // {tracks,albums,artists,playlists}
+    char*          DZArtistTopJSON(char* id);         // {tracks:[...]}
+    char*          DZArtistProfileJSON(char* id);     // {artist,top,albums,related}
+    char*          DZLyricsJSON(char* id);            // {plain,synced:[{timeMs,text}],isSynced}
+    void           DZSetReplayGain(int on);           // 0 off / 1 on
+    int            DZReplayGain(void);                // current state 0/1
 }
 
 // ---- namespace aliases ------------------------------------------------------
@@ -139,9 +147,10 @@ inline auto resume_foreground(mud::DispatcherQueue const& dq) {
 struct Track    { hstring id, name, artistLine, albumName, artworkUrl; int64_t durationMs = 0; };
 struct Album    { hstring id, name, artistLine, artworkUrl; };
 struct Playlist { hstring id, name, owner, artworkUrl; int trackCount = 0; };
+struct Account  { hstring userId, name, offer; bool canHq = false, canHifi = false, loggedIn = false; };
 
 // ---- persisted settings -----------------------------------------------------
-struct Settings { int quality = 1; bool closeToTray = true; }; // quality: 0 Normal,1 High,2 HiFi
+struct Settings { int quality = 1; bool closeToTray = true; bool replayGain = false; }; // quality: 0 Normal,1 High,2 HiFi
 
 // ---- small helpers ----------------------------------------------------------
 static hstring TakeJson(char* p) {              // own a DZ*JSON result, copy, release
@@ -212,6 +221,19 @@ static std::vector<Album> ParseAlbums(hstring const& json) {
         out.push_back(std::move(a));
     }
     return out;
+}
+
+static Account ParseAccount(hstring const& json) {     // DZAccountJSON -> single object
+    Account a;
+    wdj::JsonObject o{ nullptr };
+    if (!wdj::JsonObject::TryParse(json, o)) return a;
+    a.userId   = o.GetNamedString(L"userId", L"");
+    a.name     = o.GetNamedString(L"name", L"");
+    a.offer    = o.GetNamedString(L"offer", L"");
+    a.canHq    = o.GetNamedBoolean(L"canHq", false);
+    a.canHifi  = o.GetNamedBoolean(L"canHifi", false);
+    a.loggedIn = o.GetNamedBoolean(L"loggedIn", false);
+    return a;
 }
 
 static void Trim(std::wstring& s) {
@@ -321,9 +343,11 @@ private:
 
         m_likedItem     = NavItem(L"Liked Songs", muxc::Symbol::Audio, L"liked");
         m_playlistsItem = NavItem(L"Playlists",   muxc::Symbol::List,  L"playlists");
+        m_chartsItem    = NavItem(L"Charts",      muxc::Symbol::World, L"charts");
         m_searchItem    = NavItem(L"Search",      muxc::Symbol::Find,  L"search");
         m_nav.MenuItems().Append(m_likedItem);
         m_nav.MenuItems().Append(m_playlistsItem);
+        m_nav.MenuItems().Append(m_chartsItem);
         m_nav.MenuItems().Append(m_searchItem);
 
         m_settingsItem = NavItem(L"Settings", muxc::Symbol::Setting, L"settings");
@@ -577,6 +601,8 @@ private:
         if (ok) {
             m_loggedIn = true;
             DZSetQuality(m_settings.quality); // apply persisted quality on startup
+            DZSetReplayGain(m_settings.replayGain ? 1 : 0); // apply persisted normalization
+            LoadAccount(); // fetch tier (name / offer / hq-hifi caps) for About + Settings
             m_lastFinished = DZFinishedCount();
             m_updatingVol = true; m_volume.Value(DZVolume() * 100.0); m_updatingVol = false;
             m_timer.Start();
@@ -607,6 +633,8 @@ private:
         m_lastContentItem = item;
         if (tag == L"liked") {
             nav.Header(box_value(L"Liked Songs")); nav.Content(m_tracksPage); LoadFavorites();
+        } else if (tag == L"charts") {
+            nav.Header(box_value(L"Charts")); nav.Content(m_tracksPage); LoadCharts();
         } else if (tag == L"playlists") {
             nav.Header(box_value(L"Playlists")); nav.Content(m_playlistsPage); LoadPlaylists();
         } else if (tag == L"search") {
@@ -625,6 +653,28 @@ private:
         m_tracks = std::move(tracks);
         ++m_artGen;
         FillTrackList(m_trackList, m_tracks);
+    }
+
+    // Charts reuse the shared track list/page, exactly like Liked / playlist detail.
+    fire_and_forget LoadCharts() {
+        auto strong = get_strong();
+        if (!m_loggedIn) co_return;
+        co_await winrt::resume_background();
+        auto tracks = ParseTracks(TakeJson(DZChartsJSON())); // {"tracks":[...], ...}
+        co_await resume_foreground(m_win.DispatcherQueue());
+        m_tracks = std::move(tracks);
+        ++m_artGen;
+        FillTrackList(m_trackList, m_tracks);
+    }
+
+    // Cache the signed-in account tier for the About / Settings surfaces.
+    fire_and_forget LoadAccount() {
+        auto strong = get_strong();
+        if (!m_loggedIn) co_return;
+        co_await winrt::resume_background();
+        auto acct = ParseAccount(TakeJson(DZAccountJSON()));
+        co_await resume_foreground(m_win.DispatcherQueue());
+        m_account = std::move(acct);
     }
 
     fire_and_forget LoadPlaylists() {
@@ -1013,6 +1063,7 @@ private:
         if (wdj::JsonObject::TryParse(to_hstring(s), o)) {
             m_settings.quality = (int)o.GetNamedNumber(L"quality", (double)m_settings.quality);
             m_settings.closeToTray = o.GetNamedBoolean(L"closeToTray", m_settings.closeToTray);
+            m_settings.replayGain = o.GetNamedBoolean(L"replayGain", m_settings.replayGain);
         }
     }
 
@@ -1022,6 +1073,7 @@ private:
         wdj::JsonObject o;
         o.SetNamedValue(L"quality", wdj::JsonValue::CreateNumberValue(m_settings.quality));
         o.SetNamedValue(L"closeToTray", wdj::JsonValue::CreateBooleanValue(m_settings.closeToTray));
+        o.SetNamedValue(L"replayGain", wdj::JsonValue::CreateBooleanValue(m_settings.replayGain));
         std::string s = to_string(o.Stringify());
         std::ofstream f(SettingsPath().c_str(), std::ios::binary | std::ios::trunc);
         if (f) f.write(s.data(), static_cast<std::streamsize>(s.size()));
@@ -1058,6 +1110,28 @@ private:
         quality.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
         qsec.Children().Append(qh); qsec.Children().Append(quality);
 
+        // Warn when the selected quality exceeds what the signed-in plan supports.
+        if (m_account.loggedIn) {
+            bool exceeds = (m_settings.quality >= 2 && !m_account.canHifi) ||
+                           (m_settings.quality >= 1 && !m_account.canHq);
+            if (exceeds) {
+                muxc::TextBlock qn;
+                qn.Text(L"Your plan (" + m_account.offer + L") may not support this quality; playback falls back automatically.");
+                qn.TextWrapping(mux::TextWrapping::Wrap);
+                qn.Opacity(0.8);
+                qsec.Children().Append(qn);
+            }
+        }
+
+        // Volume normalization (ReplayGain) -- bound straight to the engine state.
+        muxc::StackPanel rsec; rsec.Spacing(4);
+        muxc::TextBlock rh; rh.Text(L"Volume normalization"); rh.FontWeight(wut::FontWeights::SemiBold());
+        muxc::ToggleSwitch rg;
+        rg.OnContent(box_value(L"Normalize loudness across tracks (ReplayGain)"));
+        rg.OffContent(box_value(L"Play tracks at their original loudness"));
+        rg.IsOn(DZReplayGain() != 0);
+        rsec.Children().Append(rh); rsec.Children().Append(rg);
+
         // Background / close-to-tray
         muxc::StackPanel tsec; tsec.Spacing(4);
         muxc::TextBlock th; th.Text(L"Background playback"); th.FontWeight(wut::FontWeights::SemiBold());
@@ -1068,6 +1142,7 @@ private:
         tsec.Children().Append(th); tsec.Children().Append(tray);
 
         sp.Children().Append(qsec);
+        sp.Children().Append(rsec);
         sp.Children().Append(tsec);
         dlg.Content(sp);
         dlg.PrimaryButtonText(L"Save");
@@ -1079,7 +1154,9 @@ private:
             int lvl = quality.SelectedIndex();
             m_settings.quality = lvl < 0 ? 0 : (lvl > 2 ? 2 : lvl);
             m_settings.closeToTray = tray.IsOn();
+            m_settings.replayGain = rg.IsOn();
             DZSetQuality(m_settings.quality); // applies to the NEXT track
+            DZSetReplayGain(m_settings.replayGain ? 1 : 0);
             SaveSettings();
         }
     }
@@ -1090,14 +1167,23 @@ private:
         dlg.XamlRoot(m_win.Content().XamlRoot());
         dlg.Title(box_value(L"About OpenDeezer"));
         muxc::StackPanel sp; sp.Spacing(8);
-        muxc::TextBlock h; h.Text(L"OpenDeezer 0.2.0"); h.FontSize(22); h.FontWeight(wut::FontWeights::SemiBold());
+        muxc::TextBlock h; h.Text(L"OpenDeezer 0.3.0"); h.FontSize(22); h.FontWeight(wut::FontWeights::SemiBold());
         h.Foreground(m_accent);
         muxc::TextBlock tag; tag.Text(L"An open source reimplementation of Deezer."); tag.TextWrapping(mux::TextWrapping::Wrap);
         muxc::TextBlock body; body.TextWrapping(mux::TextWrapping::Wrap);
         body.Text(L"Native Windows client (WinUI 3 · C++/WinRT · Fluent). The engine — login, browse, "
                   L"Blowfish decrypt, MP3 decode, WASAPI playback — is the Go core libdeezercore.dll, linked in-process.");
         muxc::TextBlock by; by.Text(L"By Cycl0o0. Licensed under AGPL-3.0."); by.Opacity(0.8);
-        sp.Children().Append(h); sp.Children().Append(tag); sp.Children().Append(body); sp.Children().Append(by);
+        sp.Children().Append(h); sp.Children().Append(tag); sp.Children().Append(body);
+        // Signed-in account tier: "<name> · <offer>".
+        if (m_account.loggedIn && !m_account.name.empty()) {
+            muxc::TextBlock acct;
+            acct.Text(L"Signed in: " + m_account.name + L" · " + m_account.offer);
+            acct.TextWrapping(mux::TextWrapping::Wrap);
+            acct.FontWeight(wut::FontWeights::SemiBold());
+            sp.Children().Append(acct);
+        }
+        sp.Children().Append(by);
         dlg.Content(sp);
         dlg.CloseButtonText(L"Close");
         co_await dlg.ShowAsync();
@@ -1110,6 +1196,7 @@ private:
 
     muxc::NavigationView m_nav{ nullptr };
     muxc::NavigationViewItem m_likedItem{ nullptr }, m_playlistsItem{ nullptr }, m_searchItem{ nullptr },
+                             m_chartsItem{ nullptr },
                              m_settingsItem{ nullptr }, m_aboutItem{ nullptr }, m_lastContentItem{ nullptr };
 
     mux::UIElement m_tracksPage{ nullptr }, m_playlistsPage{ nullptr }, m_searchPage{ nullptr };
@@ -1136,6 +1223,7 @@ private:
 
     // OS integration state
     Settings m_settings{};
+    Account  m_account{};   // cached signed-in tier (filled by LoadAccount after login)
     HWND m_appHwnd{ nullptr }, m_msgHwnd{ nullptr };
     NOTIFYICONDATAW m_nid{};
     bool m_trayAdded = false, m_quitting = false;

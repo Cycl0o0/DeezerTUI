@@ -1,0 +1,48 @@
+# golangci-lint v2 configuration for OpenDeezer.
+version: "2"
+
+run:
+  build-tags:
+    - linux
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - gocritic
+  settings:
+    govet:
+      # The MPRIS D-Bus Seek method's signature is fixed by the spec/godbus and
+      # can't satisfy io.Seeker; disable just that analyzer (all others stay on).
+      disable:
+        - stdmethods
+    staticcheck:
+      # Blowfish is required — Deezer's CDN streams use BF_CBC_STRIPE, so the
+      # SA1019 "deprecated" warning on x/crypto/blowfish can't be acted on.
+      checks:
+        - all
+        - -SA1019
+    errcheck:
+      # Idiomatic fire-and-forget calls: Close on teardown, Fprintf to a log
+      # sink, and the MPRIS D-Bus exports (failure there only loses media keys).
+      exclude-functions:
+        - (io.Closer).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*github.com/godbus/dbus/v5.Conn).Export
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - singleCaseSwitch
+  exclusions:
+    rules:
+      # The cgo bridge intentionally ignores some errors at the C boundary.
+      - path: corelib/deezercore.go
+        linters:
+          - errcheck

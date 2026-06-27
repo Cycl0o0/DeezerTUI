@@ -1,9 +1,10 @@
 package ui
 
 import (
-	"math/rand"
+	"errors"
 	"strconv"
 
+	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,13 +12,24 @@ import (
 
 const footerHeight = 4
 
-// menuRows is the home screen.
-func menuRows() []list.Item {
-	return []list.Item{
+// menuRows is the home screen. A "Resume" row is prepended when a saved
+// playback position exists.
+func (m *Model) menuRows() []list.Item {
+	var rows []list.Item
+	if r := LoadResume(); r != nil {
+		rows = append(rows, row{
+			kind: rowMenu, action: actResume,
+			title: "▶  Resume — " + r.Name,
+			desc:  r.ArtistLine + " · " + fmtMS(r.PositionMS) + " / " + fmtMS(r.DurationMS),
+		})
+	}
+	rows = append(rows,
 		row{kind: rowMenu, title: "❤  Liked Songs", desc: "your favorite tracks", action: actLiked},
 		row{kind: rowMenu, title: "≡  My Playlists", desc: "playlists you own", action: actPlaylists},
-		row{kind: rowMenu, title: "🔍 Search", desc: "tracks, albums, playlists", action: actSearch},
-	}
+		row{kind: rowMenu, title: "📈 Charts", desc: "top tracks, albums & artists", action: actCharts},
+		row{kind: rowMenu, title: "🔍 Search", desc: "tracks, albums, artists, playlists", action: actSearch},
+	)
+	return rows
 }
 
 // Update handles all messages.
@@ -34,13 +46,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loginDoneMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.status = "Login failed: " + msg.err.Error() + "  (set DEEZER_ARL or ~/.config/opendeezer/arl.txt)"
+			if errors.Is(msg.err, deezer.ErrARLExpired) {
+				m.status = "ARL expired or invalid — refresh the 'arl' cookie from deezer.com, then `opendeezer -save-arl <arl>`"
+			} else {
+				m.status = "Login failed (network?): " + msg.err.Error()
+			}
 			return m, nil
 		}
 		m.screen = screenMenu
-		m.status = "Logged in."
+		m.acct = m.client.Account()
+		if m.acct.Name != "" {
+			m.status = "Logged in as " + m.acct.Name + " · " + m.acct.Offer
+		} else {
+			m.status = "Logged in · " + m.acct.Offer
+		}
+		// Warn if the chosen quality exceeds the plan's entitlement.
+		if q := m.client.Quality(); (q == 2 && !m.acct.CanHiFi) || (q == 1 && !m.acct.CanHQ) {
+			m.status += "  (plan can't stream that quality — will fall back)"
+		}
 		m.list.Title = "OpenDeezer"
-		m.list.SetItems(menuRows())
+		m.list.SetItems(m.menuRows())
 		return m, nil
 
 	case tracksMsg:
@@ -49,8 +74,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, t := range msg.tracks {
 			items[i] = trackRow(t)
 		}
-		m.queue = msg.tracks
-		m.history = nil
+		m.q.Set(msg.tracks, 0)
 		m.list.Title = msg.title
 		m.list.SetItems(items)
 		m.list.ResetSelected()
@@ -77,6 +101,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, t := range msg.results.Tracks {
 			items = append(items, trackRow(t))
 		}
+		for _, a := range msg.results.Artists {
+			items = append(items, artistRow(a))
+		}
 		for _, a := range msg.results.Albums {
 			items = append(items, albumRow(a))
 		}
@@ -84,9 +111,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			items = append(items, playlistRow(p))
 		}
 		// Keep tracks as the playable queue context.
-		m.queue = msg.results.Tracks
-		m.history = nil
-		m.list.Title = "Search results"
+		m.q.Set(msg.results.Tracks, 0)
+		m.list.Title = "Results"
 		m.list.SetItems(items)
 		m.list.ResetSelected()
 		m.screen = screenList
@@ -101,13 +127,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.playing = true
 		m.status = ""
+		// Resume: seek to the saved position once the stream is live.
+		if m.pendingSeek > 0 {
+			m.player.SeekMS(m.pendingSeek)
+			m.pendingSeek = 0
+		}
 		m.publishMedia()
+		// New track invalidates cached lyrics.
+		m.lyrics = nil
+		m.lyricsTrack = ""
 		// Reset + fetch artwork for the new track.
 		m.curImg = nil
 		m.curCover = ""
 		m.curImgTrack = msg.track.ID
 		if artworkSupported() && msg.track.ArtworkURL != "" {
 			return m, m.coverCmd(msg.track.ID, msg.track.ArtworkURL)
+		}
+		return m, nil
+
+	case lyricsMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.status = "Lyrics: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.trackID == m.lyricsTrack {
+			m.lyrics = msg.lyrics
 		}
 		return m, nil
 
@@ -203,6 +248,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+c", "q":
+		m.saveResume()
 		m.player.Stop()
 		if m.media != nil {
 			m.media.Close()
@@ -216,14 +262,49 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		return m, m.prev()
 	case "r":
-		m.repeat = (m.repeat + 1) % 3
+		m.status = "Repeat: " + m.q.CycleRepeat().String()
 		return m, nil
 	case "z":
-		m.shuffle = !m.shuffle
-		if m.shuffle {
+		if m.q.ToggleShuffle() {
 			m.status = "Shuffle on"
 		} else {
 			m.status = "Shuffle off"
+		}
+		return m, nil
+	case "g":
+		m.list.Select(0)
+		return m, nil
+	case "G":
+		if n := len(m.list.Items()); n > 0 {
+			m.list.Select(n - 1)
+		}
+		return m, nil
+	case "u":
+		m.toggleScreen(screenQueue)
+		return m, nil
+	case "t":
+		m.status = "Theme: " + m.cycleTheme()
+		return m, nil
+	case "R":
+		on := !m.player.ReplayGain()
+		m.player.SetReplayGain(on)
+		_ = SaveReplayGain(on)
+		if on {
+			m.status = "ReplayGain on (loudness normalization)"
+		} else {
+			m.status = "ReplayGain off"
+		}
+		return m, nil
+	case "l":
+		// Show synced lyrics for the current track.
+		if t, ok := m.q.Current(); ok {
+			m.toggleScreen(screenLyrics)
+			if m.screen == screenLyrics && (m.lyrics == nil || m.lyricsTrack != t.ID) {
+				m.lyricsTrack = t.ID
+				m.loading = true
+				m.status = "Loading lyrics…"
+				return m, m.lyricsCmd(t)
+			}
 		}
 		return m, nil
 	case "+", "=":
@@ -261,30 +342,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = screenSearch
 		return m, nil
 	case "c":
-		// Toggle the now-playing / cover screen.
-		if m.screen == screenNowPlaying {
-			m.screen = m.prevScreen
-		} else {
-			m.prevScreen = m.screen
-			m.screen = screenNowPlaying
-		}
+		m.toggleScreen(screenNowPlaying)
 		return m, nil
 	case "?":
-		if m.screen == screenCredits {
-			m.screen = m.prevScreen
-		} else {
-			m.prevScreen = m.screen
-			m.screen = screenCredits
-		}
+		m.toggleScreen(screenHelp)
+		return m, nil
+	case "i":
+		m.toggleScreen(screenCredits)
 		return m, nil
 	case "esc", "backspace":
 		switch m.screen {
-		case screenNowPlaying, screenCredits:
+		case screenNowPlaying, screenCredits, screenQueue, screenLyrics, screenHelp:
 			m.screen = m.prevScreen
 		case screenList:
 			m.screen = screenMenu
 			m.list.Title = "OpenDeezer"
-			m.list.SetItems(menuRows())
+			m.list.SetItems(m.menuRows())
 			m.list.ResetSelected()
 		}
 		return m, nil
@@ -314,23 +387,38 @@ func (m *Model) activate() (tea.Model, tea.Cmd) {
 			m.status = "Loading playlists…"
 			m.loading = true
 			return m, m.playlistsCmd()
+		case actCharts:
+			m.status = "Loading charts…"
+			m.loading = true
+			return m, m.chartsCmd()
 		case actSearch:
 			m.search.SetValue("")
 			m.search.Focus()
 			m.screen = screenSearch
 			return m, nil
+		case actResume:
+			if r := LoadResume(); r != nil {
+				m.q.Set([]deezer.Track{r.Track()}, 0)
+				m.pendingSeek = r.PositionMS
+				return m, m.playCurrent()
+			}
+			return m, nil
 		}
 	case rowTrack:
-		// Play, using the current list as the queue context.
+		// Play, using the current list as the queue context. m.q holds only the
+		// tracks; map the visible row to its queue index.
 		idx := m.list.Index()
-		// queue holds only tracks; map the visible index to the queue index
-		// when the list is tracks-only (liked/playlist/album/search-tracks).
-		if idx >= 0 && idx < len(m.queue) && m.queue[idx].ID == it.track.ID {
-			m.qIndex = idx
+		ts := m.q.Tracks()
+		if idx >= 0 && idx < len(ts) && ts[idx].ID == it.track.ID {
+			m.q.SetIndex(idx)
 		} else {
-			m.qIndex = m.findInQueue(it.track.ID)
+			m.q.SetIndex(m.findInQueue(it.track.ID))
 		}
 		return m, m.playCurrent()
+	case rowArtist:
+		m.status = "Loading artist…"
+		m.loading = true
+		return m, m.artistTopCmd(it.artist)
 	case rowPlaylist:
 		m.status = "Loading playlist…"
 		m.loading = true
@@ -344,7 +432,7 @@ func (m *Model) activate() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) findInQueue(id string) int {
-	for i, t := range m.queue {
+	for i, t := range m.q.Tracks() {
 		if t.ID == id {
 			return i
 		}
@@ -352,64 +440,60 @@ func (m *Model) findInQueue(id string) int {
 	return 0
 }
 
-// playCurrent resolves + plays m.queue[m.qIndex].
+// playCurrent resolves + plays the queue's current track.
 func (m *Model) playCurrent() tea.Cmd {
-	if m.qIndex < 0 || m.qIndex >= len(m.queue) {
+	t, ok := m.q.Current()
+	if !ok {
 		return nil
 	}
-	t := m.queue[m.qIndex]
 	m.status = "Loading: " + t.Name
 	m.loading = true
 	return m.streamCmd(t)
 }
 
 func (m *Model) next() tea.Cmd {
-	if len(m.queue) == 0 {
-		return nil
+	if m.q.Next() {
+		return m.playCurrent()
 	}
-	m.history = append(m.history, m.qIndex)
-	if m.shuffle && len(m.queue) > 1 {
-		// Pick a different random track.
-		next := m.qIndex
-		for next == m.qIndex {
-			next = rand.Intn(len(m.queue))
-		}
-		m.qIndex = next
-	} else if m.qIndex+1 < len(m.queue) {
-		m.qIndex++
-	} else if m.repeat == repeatAll {
-		m.qIndex = 0
-	} else {
-		m.history = m.history[:len(m.history)-1] // nothing to advance to
-		return nil
-	}
-	return m.playCurrent()
+	return nil
 }
 
 func (m *Model) prev() tea.Cmd {
-	if len(m.queue) == 0 {
-		return nil
+	if m.q.Prev() {
+		return m.playCurrent()
 	}
-	if n := len(m.history); n > 0 {
-		m.qIndex = m.history[n-1]
-		m.history = m.history[:n-1]
-	} else if m.qIndex > 0 {
-		m.qIndex--
-	}
-	return m.playCurrent()
+	return nil
 }
 
 // advance is called when a track finishes naturally.
 func (m *Model) advance() tea.Cmd {
-	switch m.repeat {
-	case repeatOne:
+	if m.q.AdvanceAuto() {
 		return m.playCurrent()
+	}
+	m.playing = false
+	m.saveResume()
+	return nil
+}
+
+// toggleScreen flips to dst (remembering the screen to return to) or back.
+func (m *Model) toggleScreen(dst screen) {
+	if m.screen == dst {
+		m.screen = m.prevScreen
+		return
+	}
+	// Don't stack overlay-on-overlay as the return target.
+	switch m.screen {
+	case screenNowPlaying, screenCredits, screenQueue, screenLyrics, screenHelp:
 	default:
-		if cmd := m.next(); cmd != nil {
-			return cmd
-		}
-		m.playing = false
-		return nil
+		m.prevScreen = m.screen
+	}
+	m.screen = dst
+}
+
+// saveResume persists the current track + position so it can be resumed later.
+func (m *Model) saveResume() {
+	if t, ok := m.q.Current(); ok && m.playing {
+		_ = SaveResume(t, m.player.PositionMS())
 	}
 }
 

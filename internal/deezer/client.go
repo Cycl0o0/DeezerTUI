@@ -6,14 +6,21 @@ package deezer
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 )
+
+// ErrARLExpired is returned by Login when the ARL cookie is missing/expired or
+// otherwise rejected, so callers can distinguish "re-auth needed" from a
+// transient network failure and prompt the user accordingly.
+var ErrARLExpired = errors.New("ARL expired or invalid — re-login required")
 
 const (
 	gwURL    = "https://www.deezer.com/ajax/gw-light.php"
@@ -32,12 +39,28 @@ type Client struct {
 	userID       string
 	quality      int32 // 0=MP3_128, 1=MP3_320, 2=FLAC (lossless) — set atomically
 	http         *http.Client
+
+	// Account info, populated by Login.
+	userName  string
+	offerName string // e.g. "Deezer Premium", "Deezer Free"
+	canHiFi   bool   // account entitled to lossless
+	canHQ     bool   // account entitled to MP3_320
+}
+
+// Account summarizes the logged-in user's plan and entitlements.
+type Account struct {
+	UserID   string `json:"userId"`
+	Name     string `json:"name"`
+	Offer    string `json:"offer"`
+	CanHQ    bool   `json:"canHq"`   // entitled to MP3 320
+	CanHiFi  bool   `json:"canHifi"` // entitled to lossless FLAC
+	LoggedIn bool   `json:"loggedIn"`
 }
 
 // Quality levels.
 const (
-	QualityNormal = 0 // MP3 128
-	QualityHigh   = 1 // MP3 320
+	QualityNormal   = 0 // MP3 128
+	QualityHigh     = 1 // MP3 320
 	QualityLossless = 2 // FLAC (HiFi) — falls back to MP3 if unavailable
 )
 
@@ -126,11 +149,20 @@ func (c *Client) Login() error {
 		Results struct {
 			CheckForm string `json:"checkForm"`
 			User      struct {
-				UserID  json.Number `json:"USER_ID"`
-				Options struct {
-					LicenseToken string `json:"license_token"`
+				UserID    json.Number `json:"USER_ID"`
+				BlogName  string      `json:"BLOG_NAME"`
+				Firstname string      `json:"FIRSTNAME"`
+				Options   struct {
+					LicenseToken   string `json:"license_token"`
+					WebHQ          bool   `json:"web_hq"`
+					WebLossless    bool   `json:"web_lossless"`
+					MobileHQ       bool   `json:"mobile_hq"`
+					MobileLossless bool   `json:"mobile_lossless"`
 				} `json:"OPTIONS"`
 			} `json:"USER"`
+			Offers []struct {
+				Title string `json:"title"`
+			} `json:"OFFERS"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -140,9 +172,42 @@ func (c *Client) Login() error {
 	c.userID = parsed.Results.User.UserID.String()
 	c.licenseToken = parsed.Results.User.Options.LicenseToken
 	if c.apiToken == "" || c.userID == "" || c.userID == "0" {
-		return fmt.Errorf("login failed: invalid or expired ARL")
+		// A blank checkForm / user 0 is exactly what Deezer returns for an
+		// anonymous (= expired/invalid ARL) session.
+		return ErrARLExpired
+	}
+	c.userName = parsed.Results.User.BlogName
+	if c.userName == "" {
+		c.userName = parsed.Results.User.Firstname
+	}
+	opt := parsed.Results.User.Options
+	c.canHQ = opt.WebHQ || opt.MobileHQ
+	c.canHiFi = opt.WebLossless || opt.MobileLossless
+	if len(parsed.Results.Offers) > 0 {
+		c.offerName = parsed.Results.Offers[0].Title
+	}
+	if c.offerName == "" {
+		if c.canHiFi {
+			c.offerName = "Deezer (HiFi)"
+		} else if c.canHQ {
+			c.offerName = "Deezer Premium"
+		} else {
+			c.offerName = "Deezer Free"
+		}
 	}
 	return nil
+}
+
+// Account returns the logged-in user's plan + entitlement summary.
+func (c *Client) Account() Account {
+	return Account{
+		UserID:   c.userID,
+		Name:     c.userName,
+		Offer:    c.offerName,
+		CanHQ:    c.canHQ,
+		CanHiFi:  c.canHiFi,
+		LoggedIn: c.LoggedIn(),
+	}
 }
 
 // gwRaw performs one gw-light call and returns the raw response body.
@@ -319,14 +384,34 @@ func (c *Client) Search(query string) (*SearchResults, error) {
 			}
 		}
 	}
-	if b, err := c.restGet("/search/playlist?q=" + enc + "&limit=20"); err == nil {
+	if b, err := c.restGet("/search/artist?q=" + enc + "&limit=20"); err == nil {
 		var r struct {
 			Data []struct {
 				ID            json.Number `json:"id"`
-				Title         string      `json:"title"`
-				User          struct{ Name string } `json:"user"`
-				NbTracks      int         `json:"nb_tracks"`
+				Name          string      `json:"name"`
 				PictureMedium string      `json:"picture_medium"`
+				NbFan         int         `json:"nb_fan"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(b, &r) == nil {
+			for _, a := range r.Data {
+				sr.Artists = append(sr.Artists, ArtistInfo{
+					ID:         a.ID.String(),
+					Name:       a.Name,
+					ArtworkURL: a.PictureMedium,
+					NbFans:     a.NbFan,
+				})
+			}
+		}
+	}
+	if b, err := c.restGet("/search/playlist?q=" + enc + "&limit=20"); err == nil {
+		var r struct {
+			Data []struct {
+				ID            json.Number           `json:"id"`
+				Title         string                `json:"title"`
+				User          struct{ Name string } `json:"user"`
+				NbTracks      int                   `json:"nb_tracks"`
+				PictureMedium string                `json:"picture_medium"`
 			} `json:"data"`
 		}
 		if json.Unmarshal(b, &r) == nil {
@@ -458,28 +543,34 @@ func (c *Client) Playlists() ([]Playlist, error) {
 	return out, nil
 }
 
-// trackToken fetches the per-track token needed for media URL resolution.
-func (c *Client) trackToken(trackID string) (string, error) {
+// trackToken fetches the per-track token needed for media URL resolution, plus
+// the track's ReplayGain (dB) so playback can be loudness-normalized. GAIN is
+// already present in the song.getData payload, so this costs no extra request.
+func (c *Client) trackToken(trackID string) (token string, gainDB float64, err error) {
 	b, err := c.gw("song.getData", fmt.Sprintf(`{"sng_id":"%s"}`, trackID))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	var r struct {
 		Results struct {
-			TrackToken string `json:"TRACK_TOKEN"`
+			TrackToken string      `json:"TRACK_TOKEN"`
+			Gain       json.Number `json:"GAIN"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(b, &r); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return r.Results.TrackToken, nil
+	g, _ := strconv.ParseFloat(r.Results.Gain.String(), 64)
+	return r.Results.TrackToken, g, nil
 }
 
 // StreamPlan is the resolved CDN URL + track id for decryption.
 type StreamPlan struct {
-	CDNURL  string
-	TrackID string
-	Format  string
+	CDNURL    string
+	TrackID   string
+	Format    string
+	GainDB    float64 // track ReplayGain in dB (0 if unknown)
+	Encrypted bool    // false for plain CDN streams (e.g. podcast episodes)
 }
 
 // resolveMediaURL turns a track token into an encrypted CDN URL.
@@ -542,7 +633,7 @@ func (c *Client) PrepareStream(trackID string) (*StreamPlan, error) {
 	if !c.LoggedIn() {
 		return nil, fmt.Errorf("not logged in")
 	}
-	tok, err := c.trackToken(trackID)
+	tok, gain, err := c.trackToken(trackID)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +641,7 @@ func (c *Client) PrepareStream(trackID string) (*StreamPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &StreamPlan{CDNURL: u, TrackID: trackID, Format: format}, nil
+	return &StreamPlan{CDNURL: u, TrackID: trackID, Format: format, GainDB: gain, Encrypted: true}, nil
 }
 
 // TrackIDOf extracts a numeric id from "deezer:track:123", a URL, or "123".

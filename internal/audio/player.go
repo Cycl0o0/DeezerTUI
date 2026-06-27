@@ -1,3 +1,6 @@
+// Package audio is the oto-backed playback engine: it downloads, decrypts and
+// decodes Deezer streams (MP3 + FLAC) and plays one track at a time with seek,
+// volume and ReplayGain support.
 package audio
 
 import (
@@ -54,17 +57,58 @@ const (
 type Player struct {
 	ctx *oto.Context
 
-	mu      sync.Mutex
-	cur     *oto.Player
-	src     *seekSource
+	mu  sync.Mutex
+	cur *oto.Player
+	src *seekSource
 
 	state    atomic.Int32
 	played   atomic.Int64 // decoded PCM bytes consumed by oto (position)
 	totalMS  atomic.Int64
-	lastErr  atomic.Value // string
-	format   atomic.Value // string: resolved Deezer format of the current stream
-	volume   atomic.Uint64 // float64 bits, 0..1
+	lastErr  atomic.Value  // string
+	format   atomic.Value  // string: resolved Deezer format of the current stream
+	volume   atomic.Uint64 // float64 bits, user volume 0..1
+	gainFac  atomic.Uint64 // float64 bits, ReplayGain factor for current track (≤1)
+	rgOn     atomic.Bool   // apply ReplayGain loudness normalization
 	onFinish func()
+}
+
+// dbToFactor converts a ReplayGain dB value to a linear amplitude factor,
+// clamped to ≤1 so we only attenuate (oto can't amplify past the source without
+// clipping). 0 dB (or unknown) yields 1.0 (no change).
+func dbToFactor(db float64) float64 {
+	if db == 0 {
+		return 1
+	}
+	f := math.Pow(10, db/20)
+	if f > 1 {
+		f = 1
+	}
+	if f < 0 {
+		f = 0
+	}
+	return f
+}
+
+// SetReplayGain enables/disables loudness normalization for subsequent tracks
+// (and updates the current track immediately).
+func (p *Player) SetReplayGain(on bool) {
+	p.rgOn.Store(on)
+	if !on {
+		p.gainFac.Store(math.Float64bits(1))
+	}
+	p.setVolume(p.Volume()) // re-apply effective volume
+}
+
+// ReplayGain reports whether loudness normalization is enabled.
+func (p *Player) ReplayGain() bool { return p.rgOn.Load() }
+
+// effectiveVolume is the user volume scaled by the current ReplayGain factor.
+func (p *Player) effectiveVolume() float64 {
+	f := math.Float64frombits(p.gainFac.Load())
+	if f == 0 {
+		f = 1
+	}
+	return p.Volume() * f
 }
 
 // Format returns the resolved Deezer format of the current/last stream
@@ -131,6 +175,7 @@ func NewPlayer() (*Player, error) {
 	p.state.Store(int32(Stopped))
 	p.lastErr.Store("")
 	p.format.Store("")
+	p.gainFac.Store(math.Float64bits(1))
 	p.setVolume(1.0)
 	return p, nil
 }
@@ -160,9 +205,10 @@ func (p *Player) setVolume(v float64) {
 		v = 1
 	}
 	p.volume.Store(math.Float64bits(v))
+	eff := p.effectiveVolume()
 	p.mu.Lock()
 	if p.cur != nil {
-		p.cur.SetVolume(v)
+		p.cur.SetVolume(eff)
 	}
 	p.mu.Unlock()
 }
@@ -185,6 +231,12 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 	p.played.Store(0)
 	p.totalMS.Store(durationMS)
 	p.format.Store(plan.Format)
+	// ReplayGain factor for this track (1.0 when disabled or unknown).
+	if p.rgOn.Load() {
+		p.gainFac.Store(math.Float64bits(dbToFactor(plan.GainDB)))
+	} else {
+		p.gainFac.Store(math.Float64bits(1))
+	}
 
 	resp, err := http.Get(plan.CDNURL)
 	if err != nil {
@@ -204,11 +256,15 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 		return err
 	}
 
-	// Decrypt the whole BF_CBC_STRIPE buffer, then decode from a seekable reader.
-	mp3bytes, err := deezer.DecryptTrack(plan.TrackID, enc)
-	if err != nil {
-		p.fail(err)
-		return err
+	// Encrypted Deezer streams need BF_CBC_STRIPE decryption first; plain
+	// streams (e.g. podcast episodes) are already raw codec bytes.
+	mp3bytes := enc
+	if plan.Encrypted {
+		mp3bytes, err = deezer.DecryptTrack(plan.TrackID, enc)
+		if err != nil {
+			p.fail(err)
+			return err
+		}
 	}
 	// Decrypt yields the raw codec bytes; pick the decoder by the resolved
 	// format (FLAC for HiFi, else MP3). Both decode to s16 stereo PCM.
@@ -225,7 +281,7 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 
 	src := &seekSource{p: p, dec: decoder, pending: -1}
 	player := p.ctx.NewPlayer(src)
-	player.SetVolume(p.Volume())
+	player.SetVolume(p.effectiveVolume())
 
 	p.mu.Lock()
 	p.cur = player
@@ -328,7 +384,7 @@ func (p *Player) Stop() {
 func (p *Player) teardownLocked() {
 	if p.cur != nil {
 		p.cur.Pause()
-		p.cur.Close()
+		_ = p.cur.Close()
 		p.cur = nil
 	}
 	p.src = nil

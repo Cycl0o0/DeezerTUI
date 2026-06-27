@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 )
 
 // configDir is ~/.config/opendeezer.
@@ -81,4 +84,127 @@ func SaveQuality(level int) error {
 		v = "hifi"
 	}
 	return os.WriteFile(filepath.Join(dir, "quality.txt"), []byte(v+"\n"), 0600)
+}
+
+// boolFile reads a "1"/"0" toggle file (default false).
+func boolFile(name string) bool {
+	dir, err := configDir()
+	if err != nil {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(b)) == "1"
+}
+
+func saveBoolFile(name string, v bool) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	s := "0"
+	if v {
+		s = "1"
+	}
+	return os.WriteFile(filepath.Join(dir, name), []byte(s+"\n"), 0600)
+}
+
+// LoadReplayGain / SaveReplayGain persist the loudness-normalization toggle.
+func LoadReplayGain() bool        { return boolFile("replaygain.txt") }
+func SaveReplayGain(v bool) error { return saveBoolFile("replaygain.txt", v) }
+
+// LoadTheme returns the saved theme name ("" if none).
+func LoadTheme() string {
+	dir, err := configDir()
+	if err != nil {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "theme.txt"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// SaveTheme persists the theme name.
+func SaveTheme(name string) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "theme.txt"), []byte(name+"\n"), 0600)
+}
+
+// ResumeState is the last-played track plus the position to resume from.
+type ResumeState struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ArtistLine string `json:"artistLine"`
+	AlbumName  string `json:"albumName"`
+	ArtworkURL string `json:"artworkUrl"`
+	DurationMS int64  `json:"durationMs"`
+	PositionMS int64  `json:"positionMs"`
+}
+
+// Track reconstructs a deezer.Track from the saved state.
+func (r ResumeState) Track() deezer.Track {
+	return deezer.Track{
+		ID:         r.ID,
+		Name:       r.Name,
+		DurationMS: r.DurationMS,
+		Artists:    []deezer.Artist{{Name: r.ArtistLine}},
+		AlbumName:  r.AlbumName,
+		ArtworkURL: r.ArtworkURL,
+	}
+}
+
+// SaveResume writes the current track + position to resume.json. Positions in
+// the first few seconds are treated as "start over" and clear the state.
+func SaveResume(t deezer.Track, positionMS int64) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "resume.json")
+	if t.ID == "" || positionMS < 3000 {
+		_ = os.Remove(path)
+		return nil
+	}
+	rs := ResumeState{
+		ID: t.ID, Name: t.Name, ArtistLine: t.ArtistLine(), AlbumName: t.AlbumName,
+		ArtworkURL: t.ArtworkURL, DurationMS: t.DurationMS, PositionMS: positionMS,
+	}
+	b, err := json.Marshal(rs)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0600)
+}
+
+// LoadResume reads the saved resume state, or nil if none/invalid.
+func LoadResume() *ResumeState {
+	dir, err := configDir()
+	if err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "resume.json"))
+	if err != nil {
+		return nil
+	}
+	var rs ResumeState
+	if json.Unmarshal(b, &rs) != nil || rs.ID == "" {
+		return nil
+	}
+	return &rs
 }

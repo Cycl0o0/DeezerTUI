@@ -204,3 +204,26 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: OpenDeezer-windows-x64.zip
+
+  # ---- Checksums: gather every released asset and publish SHA256SUMS.txt ----
+  checksums:
+    needs: [tui, macos-app, gnome, kde, linux-unified, windows-gui]
+    if: startsWith(github.ref, 'refs/tags/') && always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist && cd dist
+          gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" || true
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist && sha256sum * > ../SHA256SUMS.txt || true
+          cat ../SHA256SUMS.txt || true
+      - name: Upload checksums
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SHA256SUMS.txt

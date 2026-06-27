@@ -21,12 +21,15 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
+	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
 )
 
 func main() {} // required for buildmode=c-archive
@@ -142,6 +145,9 @@ func DZFreeBytes(p *C.uchar) { C.free(unsafe.Pointer(p)) }
 func DZInit(arl *C.char) C.int {
 	mu.Lock()
 	defer mu.Unlock()
+	if base, err := os.UserConfigDir(); err == nil {
+		_, _ = odlog.OpenFile(filepath.Join(base, "opendeezer"))
+	}
 	if player == nil {
 		p, err := audio.NewPlayer()
 		if err != nil {
@@ -156,8 +162,10 @@ func DZInit(arl *C.char) C.int {
 	}
 	client = deezer.New(C.GoString(arl))
 	if err := client.Login(); err != nil {
+		odlog.Warn("login failed: %v", err)
 		return 0
 	}
+	odlog.Info("logged in: %s (%s)", client.Account().Name, client.Account().Offer)
 	return 1
 }
 
@@ -404,4 +412,161 @@ func withPlayer(fn func(*audio.Player)) {
 	if p != nil {
 		fn(p)
 	}
+}
+
+// ---- account / browse / lyrics / loudness (added for the v0.3 roadmap) ----
+
+type jArtistInfo struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ArtworkURL string `json:"artworkUrl"`
+	NbFans     int    `json:"nbFans"`
+}
+
+func toJArtistInfos(as []deezer.ArtistInfo) []jArtistInfo {
+	out := make([]jArtistInfo, len(as))
+	for i, a := range as {
+		out[i] = jArtistInfo{ID: a.ID, Name: a.Name, ArtworkURL: a.ArtworkURL, NbFans: a.NbFans}
+	}
+	return out
+}
+
+func toJAlbums(as []deezer.Album) []jAlbum {
+	out := make([]jAlbum, len(as))
+	for i, a := range as {
+		ar := make([]jArtist, len(a.Artists))
+		for j, x := range a.Artists {
+			ar[j] = jArtist{ID: x.ID, Name: x.Name}
+		}
+		out[i] = jAlbum{ID: a.ID, Name: a.Name, Artists: ar, ArtworkURL: a.ArtworkURL}
+	}
+	return out
+}
+
+// DZAccountJSON returns the logged-in plan + entitlements as JSON
+// {userId,name,offer,canHq,canHifi,loggedIn} so GUIs can show the tier and
+// explain why a quality tier is unavailable.
+//
+//export DZAccountJSON
+func DZAccountJSON() *C.char {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c == nil {
+		return jsonStr(nil, errNotReady)
+	}
+	return jsonStr(c.Account(), nil)
+}
+
+// DZChartsJSON returns the global top tracks/albums/artists/playlists.
+//
+//export DZChartsJSON
+func DZChartsJSON() *C.char {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c == nil {
+		return jsonStr(nil, errNotReady)
+	}
+	ch, err := c.Charts("0")
+	if err != nil {
+		return jsonStr(nil, err)
+	}
+	return jsonStr(map[string]any{
+		"tracks":    toJTracks(ch.Tracks),
+		"albums":    toJAlbums(ch.Albums),
+		"artists":   toJArtistInfos(ch.Artists),
+		"playlists": toJPlaylists(ch.Playlists),
+	}, nil)
+}
+
+func toJPlaylists(ps []deezer.Playlist) []jPlaylist {
+	out := make([]jPlaylist, len(ps))
+	for i, p := range ps {
+		out[i] = jPlaylist{ID: p.ID, Name: p.Name, Owner: p.Owner, TrackCount: p.TrackCount, ArtworkURL: p.ArtworkURL}
+	}
+	return out
+}
+
+// DZArtistTopJSON returns an artist's most popular tracks.
+//
+//export DZArtistTopJSON
+func DZArtistTopJSON(id *C.char) *C.char {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c == nil {
+		return jsonStr(nil, errNotReady)
+	}
+	ts, err := c.ArtistTop(C.GoString(id))
+	return jsonStr(map[string]any{"tracks": toJTracks(ts)}, err)
+}
+
+// DZArtistProfileJSON returns an artist profile with top tracks, albums and
+// related artists: {artist,top,albums,related}.
+//
+//export DZArtistProfileJSON
+func DZArtistProfileJSON(id *C.char) *C.char {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c == nil {
+		return jsonStr(nil, errNotReady)
+	}
+	pg, err := c.ArtistProfile(C.GoString(id))
+	if err != nil {
+		return jsonStr(nil, err)
+	}
+	info := jArtistInfo{ID: pg.Artist.ID, Name: pg.Artist.Name, ArtworkURL: pg.Artist.ArtworkURL, NbFans: pg.Artist.NbFans}
+	return jsonStr(map[string]any{
+		"artist":  info,
+		"top":     toJTracks(pg.Top),
+		"albums":  toJAlbums(pg.Albums),
+		"related": toJArtistInfos(pg.Related),
+	}, nil)
+}
+
+// DZLyricsJSON returns a track's lyrics: {plain, synced:[{timeMs,text}], isSynced}.
+//
+//export DZLyricsJSON
+func DZLyricsJSON(trackID *C.char) *C.char {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c == nil {
+		return jsonStr(nil, errNotReady)
+	}
+	l, err := c.Lyrics(C.GoString(trackID))
+	if err != nil {
+		return jsonStr(nil, err)
+	}
+	type jLine struct {
+		TimeMS int64  `json:"timeMs"`
+		Text   string `json:"text"`
+	}
+	synced := make([]jLine, len(l.Synced))
+	for i, s := range l.Synced {
+		synced[i] = jLine{TimeMS: s.TimeMS, Text: s.Text}
+	}
+	return jsonStr(map[string]any{"plain": l.Plain, "synced": synced, "isSynced": l.IsSynced()}, nil)
+}
+
+// DZSetReplayGain enables (1) / disables (0) loudness normalization.
+//
+//export DZSetReplayGain
+func DZSetReplayGain(on C.int) {
+	withPlayer(func(p *audio.Player) { p.SetReplayGain(on != 0) })
+}
+
+// DZReplayGain reports whether ReplayGain is enabled (1/0).
+//
+//export DZReplayGain
+func DZReplayGain() C.int {
+	v := 0
+	withPlayer(func(p *audio.Player) {
+		if p.ReplayGain() {
+			v = 1
+		}
+	})
+	return C.int(v)
 }
