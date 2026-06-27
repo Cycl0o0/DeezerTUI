@@ -16,6 +16,11 @@ linters:
     - gocritic
 
 linters-settings:
+  govet:
+    # The MPRIS D-Bus Seek method's signature is fixed by the spec/godbus and
+    # can't satisfy io.Seeker; disable just that analyzer (all others stay on).
+    disable:
+      - stdmethods
   gocritic:
     disabled-checks:
       - ifElseChain
