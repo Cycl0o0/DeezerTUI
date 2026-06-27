@@ -105,6 +105,13 @@ struct PlayerBar: View {
 
     private var utilities: some View {
         HStack(spacing: 14) {
+            // Like / unlike the now-playing track (one-shot; local toggle state).
+            iconButton(app.isCurrentLiked ? "heart.fill" : "heart",
+                       tint: app.isCurrentLiked ? DZ.accent : DZ.textSec) {
+                app.toggleLikeCurrent()
+            }
+            .disabled(app.current == nil || app.playingEpisode)
+            .help(app.isCurrentLiked ? "Unlike" : "Like")
             // Lyrics for the now-playing track.
             iconButton("quote.bubble", tint: app.showLyrics ? DZ.accent : DZ.textSec) {
                 app.showLyrics = true
@@ -123,7 +130,7 @@ struct PlayerBar: View {
                     .frame(width: 84).tint(DZ.accent)
             }
         }
-        .frame(width: 210, alignment: .trailing)
+        .frame(width: 248, alignment: .trailing)
     }
 
     private func iconButton(_ symbol: String, size: CGFloat = 15,

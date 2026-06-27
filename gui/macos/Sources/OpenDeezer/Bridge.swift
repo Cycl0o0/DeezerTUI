@@ -9,6 +9,19 @@ enum Core {
         s.withCString { f(UnsafeMutablePointer(mutating: $0)) }
     }
 
+    // withC2 passes two Swift strings as C strings (e.g. playlistID + trackID).
+    private static func withC2<T>(_ a: String, _ b: String,
+                                  _ f: (UnsafeMutablePointer<CChar>, UnsafeMutablePointer<CChar>) -> T) -> T {
+        withC(a) { pa in withC(b) { pb in f(pa, pb) } }
+    }
+
+    // takeString copies + frees a malloc'd C string (for non-JSON returns).
+    private static func takeString(_ ptr: UnsafeMutablePointer<CChar>?) -> String {
+        guard let p = ptr else { return "" }
+        defer { DZFree(p) }
+        return String(cString: p)
+    }
+
     private static func takeJSON(_ ptr: UnsafeMutablePointer<CChar>?) -> Data? {
         guard let p = ptr else { return nil }
         defer { DZFree(p) }
@@ -103,4 +116,78 @@ enum Core {
     /// Loudness normalization. The engine owns the value; init UI from `replayGain`.
     static func setReplayGain(_ on: Bool) { DZSetReplayGain(on ? 1 : 0) }
     static var replayGain: Bool { DZReplayGain() == 1 }
+
+    // MARK: favorites / playlist mutations (v0.4)
+
+    @discardableResult
+    static func addFavorite(_ trackID: String) -> Bool {
+        withC(trackID) { DZAddFavorite($0) } == 1
+    }
+    @discardableResult
+    static func removeFavorite(_ trackID: String) -> Bool {
+        withC(trackID) { DZRemoveFavorite($0) } == 1
+    }
+    @discardableResult
+    static func addToPlaylist(_ playlistID: String, _ trackID: String) -> Bool {
+        withC2(playlistID, trackID) { DZAddToPlaylist($0, $1) } == 1
+    }
+    @discardableResult
+    static func removeFromPlaylist(_ playlistID: String, _ trackID: String) -> Bool {
+        withC2(playlistID, trackID) { DZRemoveFromPlaylist($0, $1) } == 1
+    }
+    /// Creates an empty playlist; returns the new id (nil on failure).
+    static func createPlaylist(_ title: String) -> String? {
+        decode(CreatedPlaylist.self, takeJSON(withC(title) { DZCreatePlaylist($0) }))?.id
+    }
+    @discardableResult
+    static func renamePlaylist(_ playlistID: String, _ title: String) -> Bool {
+        withC2(playlistID, title) { DZRenamePlaylist($0, $1) } == 1
+    }
+    @discardableResult
+    static func deletePlaylist(_ playlistID: String) -> Bool {
+        withC(playlistID) { DZDeletePlaylist($0) } == 1
+    }
+
+    // MARK: Flow (v0.4)
+
+    static func flow() -> [Track] {
+        decode(TracksResponse.self, takeJSON(DZFlowJSON()))?.tracks ?? []
+    }
+
+    // MARK: podcasts (v0.4)
+
+    static func searchPodcasts(_ q: String) -> [Podcast] {
+        decode(PodcastsResponse.self, takeJSON(withC(q) { DZSearchPodcastsJSON($0) }))?.podcasts ?? []
+    }
+    static func podcastEpisodes(_ id: String) -> [Episode] {
+        decode(EpisodesResponse.self, takeJSON(withC(id) { DZPodcastEpisodesJSON($0) }))?.episodes ?? []
+    }
+    /// Plays a podcast episode via the plain (unencrypted) stream path.
+    @discardableResult
+    static func playEpisode(_ id: String, durationMs: Int64) -> Bool {
+        withC(id) { DZPlayEpisode($0, Int64(durationMs)) } == 1
+    }
+
+    // MARK: audio output device (v0.4)
+
+    static func audioDevices() -> [AudioDevice] {
+        decode(AudioDevicesResponse.self, takeJSON(DZAudioDevicesJSON()))?.devices ?? []
+    }
+    @discardableResult
+    static func setAudioDevice(_ id: String) -> Bool {
+        withC(id) { DZSetAudioDevice($0) } == 1
+    }
+    /// Selected output device id ("" = system default).
+    static var currentAudioDevice: String { takeString(DZCurrentAudioDevice()) }
+
+    // MARK: gapless / crossfade / preload (v0.4)
+
+    static func setGapless(_ on: Bool) { DZSetGapless(on ? 1 : 0) }
+    static var gapless: Bool { DZGapless() == 1 }
+    static func setCrossfadeMS(_ ms: Int) { DZSetCrossfadeMS(Int32(ms)) }
+    static var crossfadeMS: Int { Int(DZCrossfadeMS()) }
+    /// Preloads the next track for a gapless/crossfaded transition.
+    static func preload(_ trackID: String, durationMs: Int64) {
+        withC(trackID) { DZPreload($0, Int64(durationMs)) }
+    }
 }

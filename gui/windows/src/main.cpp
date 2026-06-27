@@ -104,6 +104,26 @@ extern "C" {
     char*          DZLyricsJSON(char* id);            // {plain,synced:[{timeMs,text}],isSynced}
     void           DZSetReplayGain(int on);           // 0 off / 1 on
     int            DZReplayGain(void);                // current state 0/1
+    // ---- v0.4 additions -----------------------------------------------------
+    int            DZAddFavorite(char* trackID);              // 1 ok / 0 fail
+    int            DZRemoveFavorite(char* trackID);           // 1 ok / 0 fail
+    int            DZAddToPlaylist(char* playlistID, char* trackID);    // 1/0
+    int            DZRemoveFromPlaylist(char* playlistID, char* trackID); // 1/0
+    char*          DZCreatePlaylist(char* title);            // {"id":"..."} | {"error":...}
+    int            DZRenamePlaylist(char* playlistID, char* title);     // 1/0
+    int            DZDeletePlaylist(char* playlistID);       // 1/0
+    char*          DZFlowJSON(void);                          // {"tracks":[...]}
+    char*          DZSearchPodcastsJSON(char* q);            // {"podcasts":[{id,name,description,artworkUrl,episodeCount}]}
+    char*          DZPodcastEpisodesJSON(char* podcastID);   // {"episodes":[{id,title,description,artworkUrl,durationMs,releaseDate}]}
+    int            DZPlayEpisode(char* episodeID, long long durationMS); // plain stream; 1/0
+    char*          DZAudioDevicesJSON(void);                 // {"devices":[{id,name,isDefault}]}  (id ""=default)
+    int            DZSetAudioDevice(char* id);               // 1/0 ("" = system default)
+    char*          DZCurrentAudioDevice(void);               // selected device id ("" = default)
+    void           DZSetGapless(int on);                     // 0/1
+    int            DZGapless(void);                          // current state 0/1
+    void           DZSetCrossfadeMS(int ms);                 // 0 = off
+    int            DZCrossfadeMS(void);                      // current ms
+    void           DZPreload(char* trackID, long long durationMS); // warm next for gapless/crossfade
 }
 
 // ---- namespace aliases ------------------------------------------------------
@@ -145,10 +165,15 @@ inline auto resume_foreground(mud::DispatcherQueue const& dq) {
 }
 
 // ---- wire models (mirror corelib jTrack/jAlbum/jPlaylist) -------------------
-struct Track    { hstring id, name, artistId, artistLine, albumName, artworkUrl; int64_t durationMs = 0; };
+// isEpisode flags a podcast episode: it shares the queue but plays through the
+// plain-stream path (DZPlayEpisode) and skips like / add-to-playlist / preload.
+struct Track    { hstring id, name, artistId, artistLine, albumName, artworkUrl; int64_t durationMs = 0; bool isEpisode = false; };
 struct Album    { hstring id, name, artistLine, artworkUrl; };
 struct Playlist { hstring id, name, owner, artworkUrl; int trackCount = 0; };
 struct Account  { hstring userId, name, offer; bool canHq = false, canHifi = false, loggedIn = false; };
+// DZSearchPodcastsJSON / DZPodcastEpisodesJSON wire rows.
+struct Podcast  { hstring id, name, description, artworkUrl; int episodeCount = 0; };
+struct Episode  { hstring id, title, description, artworkUrl, releaseDate; int64_t durationMs = 0; };
 
 // jArtistInfo: {id,name,artworkUrl,nbFans}  (related artists + artist header)
 struct ArtistInfo { hstring id, name, artworkUrl; int64_t nbFans = 0; };
@@ -159,7 +184,9 @@ struct Lyrics     { hstring plain; std::vector<LyricLine> synced; bool isSynced 
 struct ArtistProfile { ArtistInfo artist; std::vector<Track> top; std::vector<Album> albums; std::vector<ArtistInfo> related; };
 
 // ---- persisted settings -----------------------------------------------------
-struct Settings { int quality = 1; bool closeToTray = true; bool replayGain = false; }; // quality: 0 Normal,1 High,2 HiFi
+// quality: 0 Normal,1 High,2 HiFi. audioDevice "" = system default. crossfadeMs 0 = off.
+struct Settings { int quality = 1; bool closeToTray = true; bool replayGain = false;
+                  bool gapless = false; int crossfadeMs = 0; hstring audioDevice; };
 
 // ---- small helpers ----------------------------------------------------------
 static hstring TakeJson(char* p) {              // own a DZ*JSON result, copy, release
@@ -303,6 +330,75 @@ static ArtistProfile ParseArtistProfile(hstring const& json) {  // {artist, top,
     return p;
 }
 
+// Charts / browse "artists":[{id,name,artworkUrl,nbFans}] -> standalone artist tiles.
+static std::vector<ArtistInfo> ParseArtists(hstring const& json) {
+    std::vector<ArtistInfo> out;
+    wdj::JsonObject obj{ nullptr };
+    if (!wdj::JsonObject::TryParse(json, obj)) return out;
+    for (auto const& v : obj.GetNamedArray(L"artists", wdj::JsonArray{}))
+        out.push_back(ArtistFromObj(v.GetObject()));
+    return out;
+}
+
+static std::vector<Podcast> ParsePodcasts(hstring const& json) {
+    std::vector<Podcast> out;
+    wdj::JsonObject obj{ nullptr };
+    if (!wdj::JsonObject::TryParse(json, obj)) return out;
+    for (auto const& v : obj.GetNamedArray(L"podcasts", wdj::JsonArray{})) {
+        auto o = v.GetObject();
+        Podcast p;
+        p.id           = o.GetNamedString(L"id", L"");
+        p.name         = o.GetNamedString(L"name", L"");
+        p.description  = o.GetNamedString(L"description", L"");
+        p.artworkUrl   = o.GetNamedString(L"artworkUrl", L"");
+        p.episodeCount = static_cast<int>(o.GetNamedNumber(L"episodeCount", 0));
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
+static std::vector<Episode> ParseEpisodes(hstring const& json) {
+    std::vector<Episode> out;
+    wdj::JsonObject obj{ nullptr };
+    if (!wdj::JsonObject::TryParse(json, obj)) return out;
+    for (auto const& v : obj.GetNamedArray(L"episodes", wdj::JsonArray{})) {
+        auto o = v.GetObject();
+        Episode e;
+        e.id          = o.GetNamedString(L"id", L"");
+        e.title       = o.GetNamedString(L"title", L"");
+        e.description = o.GetNamedString(L"description", L"");
+        e.artworkUrl  = o.GetNamedString(L"artworkUrl", L"");
+        e.durationMs  = static_cast<int64_t>(o.GetNamedNumber(L"durationMs", 0));
+        e.releaseDate = o.GetNamedString(L"releaseDate", L"");
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+// DZCreatePlaylist -> {"id":"..."} (or {"error":"..."}); returns "" on failure.
+static hstring ParseCreatedId(hstring const& json) {
+    wdj::JsonObject o{ nullptr };
+    if (!wdj::JsonObject::TryParse(json, o)) return L"";
+    return o.GetNamedString(L"id", L"");
+}
+
+// DZAudioDevicesJSON -> {"devices":[{id,name,isDefault}]}.
+struct AudioDevice { hstring id, name; bool isDefault = false; };
+static std::vector<AudioDevice> ParseDevices(hstring const& json) {
+    std::vector<AudioDevice> out;
+    wdj::JsonObject obj{ nullptr };
+    if (!wdj::JsonObject::TryParse(json, obj)) return out;
+    for (auto const& v : obj.GetNamedArray(L"devices", wdj::JsonArray{})) {
+        auto o = v.GetObject();
+        AudioDevice d;
+        d.id        = o.GetNamedString(L"id", L"");
+        d.name      = o.GetNamedString(L"name", L"");
+        d.isDefault = o.GetNamedBoolean(L"isDefault", false);
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
 static void Trim(std::wstring& s) {
     auto issp = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
     size_t b = 0, e = s.size();
@@ -408,13 +504,17 @@ private:
         m_nav.IsSettingsVisible(false);
         m_nav.PaneTitle(L"OpenDeezer");
 
-        m_likedItem     = NavItem(L"Liked Songs", muxc::Symbol::Audio, L"liked");
-        m_playlistsItem = NavItem(L"Playlists",   muxc::Symbol::List,  L"playlists");
-        m_chartsItem    = NavItem(L"Charts",      muxc::Symbol::World, L"charts");
-        m_searchItem    = NavItem(L"Search",      muxc::Symbol::Find,  L"search");
+        m_likedItem     = NavItem(L"Liked Songs", muxc::Symbol::Audio,      L"liked");
+        m_flowItem      = NavItem(L"Flow",        muxc::Symbol::Play,       L"flow");
+        m_playlistsItem = NavItem(L"Playlists",   muxc::Symbol::List,       L"playlists");
+        m_chartsItem    = NavItem(L"Charts",      muxc::Symbol::World,      L"charts");
+        m_podcastsItem  = NavItem(L"Podcasts",    muxc::Symbol::Microphone, L"podcasts");
+        m_searchItem    = NavItem(L"Search",      muxc::Symbol::Find,       L"search");
         m_nav.MenuItems().Append(m_likedItem);
+        m_nav.MenuItems().Append(m_flowItem);
         m_nav.MenuItems().Append(m_playlistsItem);
         m_nav.MenuItems().Append(m_chartsItem);
+        m_nav.MenuItems().Append(m_podcastsItem);
         m_nav.MenuItems().Append(m_searchItem);
 
         m_settingsItem = NavItem(L"Settings", muxc::Symbol::Setting, L"settings");
@@ -433,12 +533,27 @@ private:
         m_trackList.ItemClick({ get_weak(), &MainWindow::OnTrackClick });
         m_tracksPage = m_trackList;
 
-        // Playlists grid
+        // Playlists page: a "New Playlist" toolbar over the grid. Rename / delete
+        // live on each tile's right-click context menu (built in FillPlaylistGrid).
         m_playlistGrid = muxc::GridView();
         m_playlistGrid.SelectionMode(muxc::ListViewSelectionMode::None);
         m_playlistGrid.IsItemClickEnabled(true);
         m_playlistGrid.ItemClick({ get_weak(), &MainWindow::OnPlaylistClick });
-        m_playlistsPage = m_playlistGrid;
+        {
+            muxc::Grid pg;
+            { muxc::RowDefinition r; r.Height(mux::GridLength{ 0, mux::GridUnitType::Auto }); pg.RowDefinitions().Append(r); }
+            { muxc::RowDefinition r; r.Height(mux::GridLength{ 1, mux::GridUnitType::Star }); pg.RowDefinitions().Append(r); }
+            pg.RowSpacing(8); pg.Padding({ 4, 4, 4, 4 });
+            muxc::StackPanel bar; bar.Orientation(muxc::Orientation::Horizontal); bar.Spacing(8);
+            muxc::Button newBtn; { muxc::StackPanel c; c.Orientation(muxc::Orientation::Horizontal); c.Spacing(6);
+                muxc::FontIcon fi; fi.Glyph(L""); c.Children().Append(fi);
+                muxc::TextBlock tb; tb.Text(L"New Playlist"); c.Children().Append(tb); newBtn.Content(c); }
+            newBtn.Click({ get_weak(), &MainWindow::OnNewPlaylist });
+            bar.Children().Append(newBtn);
+            muxc::Grid::SetRow(bar, 0); pg.Children().Append(bar);
+            muxc::Grid::SetRow(m_playlistGrid, 1); pg.Children().Append(m_playlistGrid);
+            m_playlistsPage = pg;
+        }
 
         // Search page: query row + track list + album/playlist grid
         muxc::Grid sp;
@@ -486,6 +601,97 @@ private:
 
         BuildArtistPage();
         BuildLyricsPage();
+        BuildChartsPage();
+        BuildPodcastPage();
+    }
+
+    // Charts: a scrolling column of Top Tracks + Albums + Artists + Playlists,
+    // mirroring the artist page (inner lists don't scroll; outer ScrollViewer does).
+    void BuildChartsPage() {
+        m_chartsScroll = muxc::ScrollViewer();
+        m_chartsScroll.Padding({ 16, 12, 16, 16 });
+        m_chartsScroll.HorizontalScrollMode(muxc::ScrollMode::Disabled);
+        m_chartsScroll.HorizontalScrollBarVisibility(muxc::ScrollBarVisibility::Disabled);
+        muxc::StackPanel col; col.Spacing(8);
+        auto section = [](hstring text) {
+            muxc::TextBlock h; h.Text(text); h.FontWeight(wut::FontWeights::SemiBold());
+            h.FontSize(18); h.Margin({ 0, 12, 0, 2 });
+            return h;
+        };
+        auto noInnerScroll = [](mux::DependencyObject const& el) {
+            muxc::ScrollViewer::SetVerticalScrollMode(el, muxc::ScrollMode::Disabled);
+            muxc::ScrollViewer::SetVerticalScrollBarVisibility(el, muxc::ScrollBarVisibility::Disabled);
+        };
+
+        col.Children().Append(section(L"Top Tracks"));
+        m_chartsTrackList = muxc::ListView();
+        m_chartsTrackList.SelectionMode(muxc::ListViewSelectionMode::None);
+        m_chartsTrackList.IsItemClickEnabled(true);
+        m_chartsTrackList.ItemClick({ get_weak(), &MainWindow::OnChartsTrackClick });
+        noInnerScroll(m_chartsTrackList);
+        col.Children().Append(m_chartsTrackList);
+
+        col.Children().Append(section(L"Albums"));
+        m_chartsAlbumsGrid = muxc::GridView();
+        m_chartsAlbumsGrid.SelectionMode(muxc::ListViewSelectionMode::None);
+        m_chartsAlbumsGrid.IsItemClickEnabled(true);
+        m_chartsAlbumsGrid.ItemClick({ get_weak(), &MainWindow::OnChartsAlbumClick });
+        noInnerScroll(m_chartsAlbumsGrid);
+        col.Children().Append(m_chartsAlbumsGrid);
+
+        col.Children().Append(section(L"Artists"));
+        m_chartsArtistsGrid = muxc::GridView();
+        m_chartsArtistsGrid.SelectionMode(muxc::ListViewSelectionMode::None);
+        m_chartsArtistsGrid.IsItemClickEnabled(true);
+        m_chartsArtistsGrid.ItemClick({ get_weak(), &MainWindow::OnChartsArtistClick });
+        noInnerScroll(m_chartsArtistsGrid);
+        col.Children().Append(m_chartsArtistsGrid);
+
+        col.Children().Append(section(L"Playlists"));
+        m_chartsPlaylistsGrid = muxc::GridView();
+        m_chartsPlaylistsGrid.SelectionMode(muxc::ListViewSelectionMode::None);
+        m_chartsPlaylistsGrid.IsItemClickEnabled(true);
+        m_chartsPlaylistsGrid.ItemClick({ get_weak(), &MainWindow::OnChartsPlaylistClick });
+        noInnerScroll(m_chartsPlaylistsGrid);
+        col.Children().Append(m_chartsPlaylistsGrid);
+
+        m_chartsScroll.Content(col);
+        m_chartsPage = m_chartsScroll;
+    }
+
+    // Podcasts: a search row + a grid of shows. Clicking a show loads its episodes
+    // into the shared track list (as isEpisode tracks) so playback reuses the queue.
+    void BuildPodcastPage() {
+        muxc::Grid pp;
+        { muxc::RowDefinition r; r.Height(mux::GridLength{ 0, mux::GridUnitType::Auto }); pp.RowDefinitions().Append(r); }
+        { muxc::RowDefinition r; r.Height(mux::GridLength{ 0, mux::GridUnitType::Auto }); pp.RowDefinitions().Append(r); }
+        { muxc::RowDefinition r; r.Height(mux::GridLength{ 1, mux::GridUnitType::Star }); pp.RowDefinitions().Append(r); }
+        pp.Padding({ 4, 4, 4, 4 }); pp.RowSpacing(8);
+
+        muxc::Grid queryRow; queryRow.ColumnSpacing(8);
+        queryRow.ColumnDefinitions().Append(ColStar());
+        queryRow.ColumnDefinitions().Append(ColAuto());
+        m_podcastBox = muxc::TextBox();
+        m_podcastBox.PlaceholderText(L"Search podcasts…");
+        m_podcastBox.KeyDown({ get_weak(), &MainWindow::OnPodcastKey });
+        muxc::Grid::SetColumn(m_podcastBox, 0);
+        muxc::Button pbtn; pbtn.Content(box_value(L"Search"));
+        pbtn.Click({ get_weak(), &MainWindow::OnPodcastSearchClick });
+        muxc::Grid::SetColumn(pbtn, 1);
+        queryRow.Children().Append(m_podcastBox);
+        queryRow.Children().Append(pbtn);
+        muxc::Grid::SetRow(queryRow, 0); pp.Children().Append(queryRow);
+
+        muxc::TextBlock h; h.Text(L"Shows"); h.FontWeight(wut::FontWeights::SemiBold());
+        muxc::Grid::SetRow(h, 1); pp.Children().Append(h);
+
+        m_podcastGrid = muxc::GridView();
+        m_podcastGrid.SelectionMode(muxc::ListViewSelectionMode::None);
+        m_podcastGrid.IsItemClickEnabled(true);
+        m_podcastGrid.ItemClick({ get_weak(), &MainWindow::OnPodcastClick });
+        muxc::Grid::SetRow(m_podcastGrid, 2); pp.Children().Append(m_podcastGrid);
+
+        m_podcastPage = pp;
     }
 
     // Artist detail: a scrolling column of name/fans + Top Tracks + Albums +
@@ -576,18 +782,30 @@ private:
         m_cover = muxc::Image(); m_cover.Width(48); m_cover.Height(48); m_cover.VerticalAlignment(mux::VerticalAlignment::Center);
         muxc::Grid::SetColumn(m_cover, 0); bar.Children().Append(m_cover);
 
-        muxc::StackPanel now; now.VerticalAlignment(mux::VerticalAlignment::Center); now.MinWidth(170); now.MaxWidth(240);
+        muxc::StackPanel now; now.VerticalAlignment(mux::VerticalAlignment::Center); now.MinWidth(170); now.MaxWidth(300);
         m_nowTitle  = muxc::TextBlock(); m_nowTitle.Text(L"Logging in…"); m_nowTitle.FontWeight(wut::FontWeights::SemiBold());
         m_nowTitle.TextWrapping(mux::TextWrapping::NoWrap); m_nowTitle.TextTrimming(mux::TextTrimming::CharacterEllipsis);
         m_nowArtist = muxc::TextBlock(); m_nowArtist.Opacity(0.6); m_nowArtist.FontSize(12);
         m_nowArtist.TextWrapping(mux::TextWrapping::NoWrap); m_nowArtist.TextTrimming(mux::TextTrimming::CharacterEllipsis);
         now.Children().Append(m_nowTitle); now.Children().Append(m_nowArtist);
-        // Quick links to the Lyrics + Artist views for the current track.
-        muxc::StackPanel meta; meta.Orientation(muxc::Orientation::Horizontal); meta.Spacing(10);
+        // Quick actions for the current track: Like (heart toggle), Add-to-playlist,
+        // and links to the Lyrics + Artist views.
+        muxc::StackPanel meta; meta.Orientation(muxc::Orientation::Horizontal); meta.Spacing(6); meta.VerticalAlignment(mux::VerticalAlignment::Center);
+        m_likeBtn = muxp::ToggleButton();
+        { muxc::FontIcon fi; fi.Glyph(L""); fi.FontSize(14); m_likeBtn.Content(fi); } // Segoe MDL2 Heart
+        m_likeBtn.Padding({ 6, 2, 6, 2 });
+        winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(m_likeBtn, box_value(L"Like / unlike"));
+        m_likeBtn.Click({ get_weak(), &MainWindow::OnLike });
+        m_addBtn = muxc::Button();
+        { muxc::FontIcon fi; fi.Glyph(L"\uECC8"); fi.FontSize(14); m_addBtn.Content(fi); } // add to playlist
+        m_addBtn.Padding({ 6, 2, 6, 2 });
+        winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(m_addBtn, box_value(L"Add to playlist"));
+        m_addBtn.Click({ get_weak(), &MainWindow::OnAddCurrentToPlaylist });
         m_lyricsBtn = muxc::HyperlinkButton(); m_lyricsBtn.Content(box_value(L"Lyrics"));
-        m_lyricsBtn.Padding({ 0, 0, 0, 0 }); m_lyricsBtn.Click({ get_weak(), &MainWindow::OnLyrics });
+        m_lyricsBtn.Padding({ 4, 0, 4, 0 }); m_lyricsBtn.Click({ get_weak(), &MainWindow::OnLyrics });
         m_artistBtn = muxc::HyperlinkButton(); m_artistBtn.Content(box_value(L"Artist"));
-        m_artistBtn.Padding({ 0, 0, 0, 0 }); m_artistBtn.Click({ get_weak(), &MainWindow::OnArtist });
+        m_artistBtn.Padding({ 4, 0, 4, 0 }); m_artistBtn.Click({ get_weak(), &MainWindow::OnArtist });
+        meta.Children().Append(m_likeBtn); meta.Children().Append(m_addBtn);
         meta.Children().Append(m_lyricsBtn); meta.Children().Append(m_artistBtn);
         now.Children().Append(meta);
         muxc::Grid::SetColumn(now, 1); bar.Children().Append(now);
@@ -649,6 +867,17 @@ private:
         muxc::TextBlock dur; dur.Text(TimeText(t.durationMs)); dur.Opacity(0.6); dur.VerticalAlignment(mux::VerticalAlignment::Center);
         muxc::Grid::SetColumn(dur, 2); g.Children().Append(dur);
         if (!t.artworkUrl.empty()) LoadArt(img, t.artworkUrl, m_artGen, false);
+        // Right-click row actions (skipped for podcast episodes, which aren't
+        // library tracks and can't be liked / added to a music playlist).
+        if (!t.isEpisode && !t.id.empty()) {
+            muxc::MenuFlyout mf;
+            muxc::MenuFlyoutItem like; like.Text(L"Like"); like.Tag(box_value(t.id));
+            like.Click({ get_weak(), &MainWindow::OnRowLike });
+            muxc::MenuFlyoutItem add; add.Text(L"Add to playlist…"); add.Tag(box_value(t.id));
+            add.Click({ get_weak(), &MainWindow::OnRowAddToPlaylist });
+            mf.Items().Append(like); mf.Items().Append(add);
+            g.ContextFlyout(mf);
+        }
         return g;
     }
 
@@ -675,7 +904,16 @@ private:
         int i = 0;
         for (auto const& p : m_playlists) {
             hstring sub = to_hstring(p.trackCount) + L" tracks";
-            m_playlistGrid.Items().Append(MakeTile(p.name, sub, p.artworkUrl, i));
+            auto tile = MakeTile(p.name, sub, p.artworkUrl, i);
+            // Per-tile right-click: rename / delete. Tag carries the m_playlists index.
+            muxc::MenuFlyout mf;
+            muxc::MenuFlyoutItem rn; rn.Text(L"Rename…"); rn.Tag(box_value(i));
+            rn.Click({ get_weak(), &MainWindow::OnPlaylistRename });
+            muxc::MenuFlyoutItem del; del.Text(L"Delete…"); del.Tag(box_value(i));
+            del.Click({ get_weak(), &MainWindow::OnPlaylistDelete });
+            mf.Items().Append(rn); mf.Items().Append(del);
+            if (auto fe = tile.try_as<mux::FrameworkElement>()) fe.ContextFlyout(mf);
+            m_playlistGrid.Items().Append(tile);
             ++i;
         }
     }
@@ -750,6 +988,12 @@ private:
             m_loggedIn = true;
             DZSetQuality(m_settings.quality); // apply persisted quality on startup
             DZSetReplayGain(m_settings.replayGain ? 1 : 0); // apply persisted normalization
+            DZSetGapless(m_settings.gapless ? 1 : 0);       // apply persisted gapless
+            DZSetCrossfadeMS(m_settings.crossfadeMs);       // apply persisted crossfade
+            if (!m_settings.audioDevice.empty()) {          // apply persisted output device
+                std::string dev = to_string(m_settings.audioDevice);
+                DZSetAudioDevice(dev.data());
+            }
             LoadAccount(); // fetch tier (name / offer / hq-hifi caps) for About + Settings
             m_lastFinished = DZFinishedCount();
             m_updatingVol = true; m_volume.Value(DZVolume() * 100.0); m_updatingVol = false;
@@ -782,10 +1026,15 @@ private:
         m_lyricsShown = false; // leaving the lyrics/artist page for a menu page
         if (tag == L"liked") {
             nav.Header(box_value(L"Liked Songs")); nav.Content(m_tracksPage); LoadFavorites();
+        } else if (tag == L"flow") {
+            nav.Header(box_value(L"Flow")); nav.Content(m_tracksPage); LoadFlow();
         } else if (tag == L"charts") {
-            nav.Header(box_value(L"Charts")); nav.Content(m_tracksPage); LoadCharts();
+            nav.Header(box_value(L"Charts")); nav.Content(m_chartsPage); LoadCharts();
         } else if (tag == L"playlists") {
             nav.Header(box_value(L"Playlists")); nav.Content(m_playlistsPage); LoadPlaylists();
+        } else if (tag == L"podcasts") {
+            nav.Header(box_value(L"Podcasts")); nav.Content(m_podcastPage);
+            m_podcastBox.Focus(mux::FocusState::Programmatic);
         } else if (tag == L"search") {
             nav.Header(box_value(L"Search")); nav.Content(m_searchPage);
             m_searchBox.Focus(mux::FocusState::Programmatic);
@@ -804,13 +1053,128 @@ private:
         FillTrackList(m_trackList, m_tracks);
     }
 
-    // Charts reuse the shared track list/page, exactly like Liked / playlist detail.
+    // Charts: {tracks,albums,artists,playlists} -> the dedicated sectioned page.
     fire_and_forget LoadCharts() {
         auto strong = get_strong();
         if (!m_loggedIn) co_return;
         co_await winrt::resume_background();
-        auto tracks = ParseTracks(TakeJson(DZChartsJSON())); // {"tracks":[...], ...}
+        hstring json = TakeJson(DZChartsJSON());
+        auto tracks    = ParseTracks(json);
+        auto albums    = ParseAlbums(json);
+        auto artists   = ParseArtists(json);
+        auto playlists = ParsePlaylists(json);
         co_await resume_foreground(m_win.DispatcherQueue());
+        m_chartsTracks    = std::move(tracks);
+        m_chartsAlbums    = std::move(albums);
+        m_chartsArtists   = std::move(artists);
+        m_chartsPlaylists = std::move(playlists);
+        ++m_artGen;
+        FillTrackList(m_chartsTrackList, m_chartsTracks);
+        FillTileGrid(m_chartsAlbumsGrid,    m_chartsAlbums);
+        FillArtistTiles(m_chartsArtistsGrid, m_chartsArtists);
+        FillPlaylistTiles(m_chartsPlaylistsGrid, m_chartsPlaylists);
+        try { m_chartsScroll.ChangeView(nullptr, Ref(0.0), nullptr); } catch (...) {}
+    }
+
+    // Flow: the personalized stream -> the shared track list, then auto-play head.
+    fire_and_forget LoadFlow() {
+        auto strong = get_strong();
+        if (!m_loggedIn) co_return;
+        co_await winrt::resume_background();
+        auto tracks = ParseTracks(TakeJson(DZFlowJSON())); // {"tracks":[...]}
+        co_await resume_foreground(m_win.DispatcherQueue());
+        m_tracks = std::move(tracks);
+        ++m_artGen;
+        FillTrackList(m_trackList, m_tracks);
+        if (!m_tracks.empty()) PlayFrom(m_tracks, 0);
+    }
+
+    // Generic tile fillers (Tag = index into the matching vector).
+    void FillTileGrid(muxc::GridView const& grid, std::vector<Album> const& albums) {
+        grid.Items().Clear();
+        int i = 0;
+        for (auto const& a : albums) { grid.Items().Append(MakeTile(a.name, a.artistLine, a.artworkUrl, i)); ++i; }
+    }
+    void FillArtistTiles(muxc::GridView const& grid, std::vector<ArtistInfo> const& artists) {
+        grid.Items().Clear();
+        int i = 0;
+        for (auto const& a : artists) { grid.Items().Append(MakeTile(a.name, FansText(a.nbFans), a.artworkUrl, i)); ++i; }
+    }
+    void FillPlaylistTiles(muxc::GridView const& grid, std::vector<Playlist> const& plists) {
+        grid.Items().Clear();
+        int i = 0;
+        for (auto const& p : plists) { grid.Items().Append(MakeTile(p.name, p.owner, p.artworkUrl, i)); ++i; }
+    }
+
+    // ---- charts activation --------------------------------------------------
+    void OnChartsTrackClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
+        int i = TagIndex(e.ClickedItem()); if (i >= 0) PlayFrom(m_chartsTracks, i);
+    }
+    void OnChartsAlbumClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
+        int i = TagIndex(e.ClickedItem());
+        if (i >= 0 && i < static_cast<int>(m_chartsAlbums.size())) OpenAlbum(m_chartsAlbums[i]);
+    }
+    void OnChartsArtistClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
+        int i = TagIndex(e.ClickedItem());
+        if (i >= 0 && i < static_cast<int>(m_chartsArtists.size())) OpenArtist(m_chartsArtists[i].id);
+    }
+    void OnChartsPlaylistClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
+        int i = TagIndex(e.ClickedItem());
+        if (i >= 0 && i < static_cast<int>(m_chartsPlaylists.size())) OpenPlaylist(m_chartsPlaylists[i]);
+    }
+
+    // ---- podcasts -----------------------------------------------------------
+    void OnPodcastSearchClick(wf::IInspectable const&, mux::RoutedEventArgs const&) { RunPodcastSearch(); }
+    void OnPodcastKey(wf::IInspectable const&, muxin::KeyRoutedEventArgs const& e) {
+        if (e.Key() == wsys::VirtualKey::Enter) RunPodcastSearch();
+    }
+    fire_and_forget RunPodcastSearch() {
+        auto strong = get_strong();
+        if (!m_loggedIn) co_return;
+        auto q = m_podcastBox.Text();
+        if (q.empty()) co_return;
+        co_await winrt::resume_background();
+        std::string s = to_string(q);
+        auto pods = ParsePodcasts(TakeJson(DZSearchPodcastsJSON(s.data())));
+        co_await resume_foreground(m_win.DispatcherQueue());
+        m_podcasts = std::move(pods);
+        ++m_artGen;
+        m_podcastGrid.Items().Clear();
+        int i = 0;
+        for (auto const& p : m_podcasts) {
+            hstring sub = p.episodeCount > 0 ? to_hstring(p.episodeCount) + L" episodes" : p.description;
+            m_podcastGrid.Items().Append(MakeTile(p.name, sub, p.artworkUrl, i));
+            ++i;
+        }
+    }
+    void OnPodcastClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
+        int i = TagIndex(e.ClickedItem());
+        if (i >= 0 && i < static_cast<int>(m_podcasts.size())) OpenPodcast(m_podcasts[i]);
+    }
+    // Episodes load into the shared track list as isEpisode tracks; clicking a row
+    // plays through the episode (plain-stream) path via the unified queue.
+    fire_and_forget OpenPodcast(Podcast pod) {
+        auto strong = get_strong();
+        m_lyricsShown = false;
+        m_nav.Header(box_value(pod.name));
+        m_nav.Content(m_tracksPage);
+        co_await winrt::resume_background();
+        std::string s = to_string(pod.id);
+        auto eps = ParseEpisodes(TakeJson(DZPodcastEpisodesJSON(s.data())));
+        co_await resume_foreground(m_win.DispatcherQueue());
+        std::vector<Track> tracks;
+        tracks.reserve(eps.size());
+        for (auto const& e : eps) {
+            Track t;
+            t.id         = e.id;
+            t.name       = e.title;
+            t.artistLine = pod.name;
+            t.albumName  = pod.name;
+            t.artworkUrl = e.artworkUrl.empty() ? pod.artworkUrl : e.artworkUrl;
+            t.durationMs = e.durationMs;
+            t.isEpisode  = true;
+            tracks.push_back(std::move(t));
+        }
         m_tracks = std::move(tracks);
         ++m_artGen;
         FillTrackList(m_trackList, m_tracks);
@@ -1086,6 +1450,166 @@ private:
         if (e.Key() == wsys::VirtualKey::Enter) RunSearch();
     }
 
+    // ---- library mutations: like / add-to-playlist / playlist CRUD ----------
+    // No "is-liked" query exists, so the heart is a local toggle: checked -> add,
+    // unchecked -> remove. It resets to off on every track change (SetNowPlaying).
+    void OnLike(wf::IInspectable const&, mux::RoutedEventArgs const&) {
+        if (m_suppressLike) return; // programmatic reset, not a user click
+        hstring id = CurrentTrackId();
+        bool want = m_likeBtn.IsChecked() && m_likeBtn.IsChecked().Value();
+        if (id.empty()) { m_suppressLike = true; m_likeBtn.IsChecked(false); m_suppressLike = false; return; }
+        DispatchLike(id, want);
+    }
+    fire_and_forget DispatchLike(hstring id, bool like) {
+        auto strong = get_strong();
+        co_await winrt::resume_background();
+        std::string s = to_string(id);
+        if (like) DZAddFavorite(s.data()); else DZRemoveFavorite(s.data());
+    }
+    void OnRowLike(wf::IInspectable const& sender, mux::RoutedEventArgs const&) {
+        auto fe = sender.try_as<mux::FrameworkElement>(); if (!fe) return;
+        hstring id = unbox_value_or<hstring>(fe.Tag(), L"");
+        if (!id.empty()) DispatchLike(id, true); // row context menu is a one-shot like
+    }
+    void OnRowAddToPlaylist(wf::IInspectable const& sender, mux::RoutedEventArgs const&) {
+        auto fe = sender.try_as<mux::FrameworkElement>(); if (!fe) return;
+        hstring id = unbox_value_or<hstring>(fe.Tag(), L"");
+        if (!id.empty()) ShowAddToPlaylist(id);
+    }
+    void OnAddCurrentToPlaylist(wf::IInspectable const&, mux::RoutedEventArgs const&) {
+        hstring id = CurrentTrackId();
+        if (id.empty()) { ShowMessage(L"No track", L"Start playing a track to add it to a playlist."); return; }
+        ShowAddToPlaylist(id);
+    }
+
+    // Picker: "New playlist…" + the user's playlists. A selection adds the track;
+    // "New playlist…" prompts for a name, creates it, then adds the track.
+    fire_and_forget ShowAddToPlaylist(hstring trackId) {
+        auto strong = get_strong();
+        if (!m_loggedIn || trackId.empty()) co_return;
+        co_await winrt::resume_background();
+        auto plists = ParsePlaylists(TakeJson(DZPlaylistsJSON()));
+        co_await resume_foreground(m_win.DispatcherQueue());
+
+        muxc::ContentDialog dlg;
+        dlg.XamlRoot(m_win.Content().XamlRoot());
+        dlg.Title(box_value(L"Add to playlist"));
+        muxc::ListView list; list.SelectionMode(muxc::ListViewSelectionMode::Single);
+        list.MaxHeight(360); list.MinWidth(320);
+        { muxc::TextBlock tb; tb.Text(L"＋  New playlist…"); list.Items().Append(tb); } // index 0
+        for (auto const& p : plists) { muxc::TextBlock tb; tb.Text(p.name); list.Items().Append(tb); }
+        list.SelectedIndex(plists.empty() ? 0 : 1);
+        dlg.Content(list);
+        dlg.PrimaryButtonText(L"Add");
+        dlg.CloseButtonText(L"Cancel");
+        dlg.DefaultButton(muxc::ContentDialogButton::Primary);
+        auto res = co_await dlg.ShowAsync();
+        if (res != muxc::ContentDialogResult::Primary) co_return;
+
+        int idx = list.SelectedIndex();
+        if (idx < 0) co_return;
+        hstring playlistId;
+        if (idx == 0) {                                  // New playlist…
+            hstring name = co_await PromptText(L"New playlist", L"Playlist name", L"");
+            std::wstring w{ name.c_str() }; Trim(w);
+            if (w.empty()) co_return;
+            hstring title{ w };
+            co_await winrt::resume_background();
+            std::string ts = to_string(title);
+            playlistId = ParseCreatedId(TakeJson(DZCreatePlaylist(ts.data())));
+            co_await resume_foreground(m_win.DispatcherQueue());
+            if (playlistId.empty()) { ShowMessage(L"Couldn't create playlist", L"The playlist could not be created."); co_return; }
+        } else {
+            int pi = idx - 1;
+            if (pi < 0 || pi >= static_cast<int>(plists.size())) co_return;
+            playlistId = plists[pi].id;
+        }
+        if (playlistId.empty()) co_return;
+        co_await winrt::resume_background();
+        std::string ps = to_string(playlistId), tk = to_string(trackId);
+        int ok = DZAddToPlaylist(ps.data(), tk.data());
+        co_await resume_foreground(m_win.DispatcherQueue());
+        if (!ok) ShowMessage(L"Couldn't add to playlist", L"The track could not be added.");
+    }
+
+    fire_and_forget OnNewPlaylist(wf::IInspectable const&, mux::RoutedEventArgs const&) {
+        auto strong = get_strong();
+        if (!m_loggedIn) co_return;
+        hstring name = co_await PromptText(L"New playlist", L"Playlist name", L"");
+        std::wstring w{ name.c_str() }; Trim(w);
+        if (w.empty()) co_return;
+        hstring title{ w };
+        co_await winrt::resume_background();
+        std::string ts = to_string(title);
+        hstring newId = ParseCreatedId(TakeJson(DZCreatePlaylist(ts.data())));
+        co_await resume_foreground(m_win.DispatcherQueue());
+        if (newId.empty()) { ShowMessage(L"Couldn't create playlist", L"The playlist could not be created."); co_return; }
+        LoadPlaylists();                                 // refresh the grid
+    }
+
+    fire_and_forget OnPlaylistRename(wf::IInspectable const& sender, mux::RoutedEventArgs const&) {
+        auto strong = get_strong();
+        auto fe = sender.try_as<mux::FrameworkElement>(); if (!fe) co_return;
+        int i = unbox_value_or<int>(fe.Tag(), -1);
+        if (i < 0 || i >= static_cast<int>(m_playlists.size())) co_return;
+        Playlist p = m_playlists[i];
+        hstring name = co_await PromptText(L"Rename playlist", L"Playlist name", p.name);
+        std::wstring w{ name.c_str() }; Trim(w);
+        if (w.empty()) co_return;
+        hstring title{ w };
+        co_await winrt::resume_background();
+        std::string ps = to_string(p.id), ts = to_string(title);
+        int ok = DZRenamePlaylist(ps.data(), ts.data());
+        co_await resume_foreground(m_win.DispatcherQueue());
+        if (!ok) { ShowMessage(L"Couldn't rename", L"The playlist could not be renamed."); co_return; }
+        LoadPlaylists();
+    }
+
+    fire_and_forget OnPlaylistDelete(wf::IInspectable const& sender, mux::RoutedEventArgs const&) {
+        auto strong = get_strong();
+        auto fe = sender.try_as<mux::FrameworkElement>(); if (!fe) co_return;
+        int i = unbox_value_or<int>(fe.Tag(), -1);
+        if (i < 0 || i >= static_cast<int>(m_playlists.size())) co_return;
+        Playlist p = m_playlists[i];
+        bool yes = co_await Confirm(L"Delete playlist",
+            L"Delete “" + p.name + L"”? This can't be undone.", L"Delete");
+        if (!yes) co_return;
+        co_await winrt::resume_background();
+        std::string ps = to_string(p.id);
+        int ok = DZDeletePlaylist(ps.data());
+        co_await resume_foreground(m_win.DispatcherQueue());
+        if (!ok) { ShowMessage(L"Couldn't delete", L"The playlist could not be deleted."); co_return; }
+        LoadPlaylists();
+    }
+
+    // Small reusable modal helpers (single-line text entry + yes/no confirm).
+    wf::IAsyncOperation<hstring> PromptText(hstring title, hstring placeholder, hstring initial) {
+        auto strong = get_strong();
+        muxc::ContentDialog dlg;
+        dlg.XamlRoot(m_win.Content().XamlRoot());
+        dlg.Title(box_value(title));
+        muxc::TextBox tb; tb.PlaceholderText(placeholder); tb.Text(initial); tb.AcceptsReturn(false);
+        dlg.Content(tb);
+        dlg.PrimaryButtonText(L"OK");
+        dlg.CloseButtonText(L"Cancel");
+        dlg.DefaultButton(muxc::ContentDialogButton::Primary);
+        auto res = co_await dlg.ShowAsync();
+        co_return res == muxc::ContentDialogResult::Primary ? tb.Text() : hstring(L"");
+    }
+    wf::IAsyncOperation<bool> Confirm(hstring title, hstring body, hstring okText) {
+        auto strong = get_strong();
+        muxc::ContentDialog dlg;
+        dlg.XamlRoot(m_win.Content().XamlRoot());
+        dlg.Title(box_value(title));
+        muxc::TextBlock t; t.Text(body); t.TextWrapping(mux::TextWrapping::Wrap);
+        dlg.Content(t);
+        dlg.PrimaryButtonText(okText);
+        dlg.CloseButtonText(L"Cancel");
+        dlg.DefaultButton(muxc::ContentDialogButton::Close);
+        auto res = co_await dlg.ShowAsync();
+        co_return res == muxc::ContentDialogResult::Primary;
+    }
+
     // ---- playback -----------------------------------------------------------
     void PlayFrom(std::vector<Track> const& list, int index) {
         m_queue = list; m_queueIndex = index; PlayCurrent();
@@ -1100,13 +1624,62 @@ private:
         m_updatingSeek = false;
         m_posText.Text(TimeText(0));
         m_durText.Text(TimeText(t.durationMs));
-        DispatchPlay(t.id, t.durationMs);
+        // Gapless: warm the deterministic next track so the engine can swap to it
+        // when this one ends (only for real tracks, never shuffle / repeat-one).
+        hstring nextId; int64_t nextDur = 0;
+        int n;
+        if (m_settings.gapless && !t.isEpisode && HasDeterministicNext(&n)) {
+            nextId = m_queue[n].id; nextDur = m_queue[n].durationMs;
+        }
+        DispatchPlay(t.id, t.durationMs, t.isEpisode, nextId, nextDur);
     }
-    fire_and_forget DispatchPlay(hstring id, int64_t dur) {
+    // Blocking play (then optional preload) serialized on one background task so
+    // the preload warms only after the current stream is prepared.
+    fire_and_forget DispatchPlay(hstring id, int64_t dur, bool episode, hstring nextId, int64_t nextDur) {
         auto strong = get_strong();
         co_await winrt::resume_background();
         std::string s = to_string(id);
-        DZPlay(s.data(), dur); // prepares the stream over the network -> blocks
+        if (episode) DZPlayEpisode(s.data(), dur); // plain, unencrypted stream
+        else         DZPlay(s.data(), dur);        // prepares the stream over the network -> blocks
+        if (!nextId.empty()) {
+            std::string ns = to_string(nextId);
+            DZPreload(ns.data(), nextDur);         // warm next for the gapless swap
+        }
+    }
+    fire_and_forget DispatchPreload(hstring id, int64_t dur) {
+        auto strong = get_strong();
+        co_await winrt::resume_background();
+        std::string s = to_string(id);
+        DZPreload(s.data(), dur);
+    }
+    // The next queue index when advance is deterministic (not shuffle, not
+    // repeat-one, next exists and is a real track). Mirrors Next()'s ordering.
+    bool HasDeterministicNext(int* out) {
+        if (m_shuffle || m_repeat == 2 || m_queue.empty()) return false;
+        int n;
+        if (m_queueIndex + 1 < static_cast<int>(m_queue.size())) n = m_queueIndex + 1;
+        else if (m_repeat == 1)                                  n = 0;
+        else                                                     return false;
+        if (n < 0 || n >= static_cast<int>(m_queue.size())) return false;
+        if (m_queue[n].isEpisode) return false; // episodes don't use the preload swap
+        *out = n;
+        return true;
+    }
+    // Engine already gaplessly swapped to the preloaded next: advance the UI's
+    // queue pointer + now-playing WITHOUT re-issuing play, then warm the new next.
+    void AdvanceUiToPreloaded(int n) {
+        m_queueIndex = n;
+        Track t = m_queue[m_queueIndex];
+        SetNowPlaying(t);
+        m_updatingSeek = true;
+        m_seek.Maximum(static_cast<double>(t.durationMs > 0 ? t.durationMs : 1));
+        m_seek.Value(0);
+        m_updatingSeek = false;
+        m_posText.Text(TimeText(0));
+        m_durText.Text(TimeText(t.durationMs));
+        int n2;
+        if (m_settings.gapless && !t.isEpisode && HasDeterministicNext(&n2))
+            DispatchPreload(m_queue[n2].id, m_queue[n2].durationMs);
     }
     void SetNowPlaying(Track const& t) {
         m_nowTitle.Text(t.name);
@@ -1115,6 +1688,13 @@ private:
         m_cover.Source(nullptr);
         int token = ++m_playGen;
         if (!t.artworkUrl.empty()) LoadArt(m_cover, t.artworkUrl, token, true);
+        // No "is-liked" query exists; reset the heart to off on every track change.
+        // Like / add-to-playlist are library-track only, so disable them for episodes.
+        if (m_likeBtn) {
+            m_suppressLike = true; m_likeBtn.IsChecked(false); m_suppressLike = false;
+            m_likeBtn.IsEnabled(!t.isEpisode);
+        }
+        if (m_addBtn) m_addBtn.IsEnabled(!t.isEpisode);
         // Push the new track to the OS media overlay / lock screen.
         UpdateSmtcMetadata(t);
     }
@@ -1210,7 +1790,19 @@ private:
         }
 
         int f = DZFinishedCount();
-        if (f != m_lastFinished) { m_lastFinished = f; if (m_repeat == 2) PlayCurrent(); else Next(); }
+        if (f != m_lastFinished) {
+            m_lastFinished = f;
+            int n;
+            if (m_repeat == 2) {
+                PlayCurrent();                                    // repeat-one
+            } else if (m_settings.gapless && st == 2 && HasDeterministicNext(&n)) {
+                // The engine kept playing -> it already swapped to the preloaded
+                // next track. Advance the UI pointer only (no second DZPlay).
+                AdvanceUiToPreloaded(n);
+            } else {
+                Next();                                           // normal advance / restart
+            }
+        }
     }
 
     // ---- SystemMediaTransportControls (OS media overlay / media keys) -------
@@ -1400,6 +1992,9 @@ private:
             m_settings.quality = (int)o.GetNamedNumber(L"quality", (double)m_settings.quality);
             m_settings.closeToTray = o.GetNamedBoolean(L"closeToTray", m_settings.closeToTray);
             m_settings.replayGain = o.GetNamedBoolean(L"replayGain", m_settings.replayGain);
+            m_settings.gapless = o.GetNamedBoolean(L"gapless", m_settings.gapless);
+            m_settings.crossfadeMs = (int)o.GetNamedNumber(L"crossfadeMs", (double)m_settings.crossfadeMs);
+            m_settings.audioDevice = o.GetNamedString(L"audioDevice", m_settings.audioDevice);
         }
     }
 
@@ -1410,6 +2005,9 @@ private:
         o.SetNamedValue(L"quality", wdj::JsonValue::CreateNumberValue(m_settings.quality));
         o.SetNamedValue(L"closeToTray", wdj::JsonValue::CreateBooleanValue(m_settings.closeToTray));
         o.SetNamedValue(L"replayGain", wdj::JsonValue::CreateBooleanValue(m_settings.replayGain));
+        o.SetNamedValue(L"gapless", wdj::JsonValue::CreateBooleanValue(m_settings.gapless));
+        o.SetNamedValue(L"crossfadeMs", wdj::JsonValue::CreateNumberValue(m_settings.crossfadeMs));
+        o.SetNamedValue(L"audioDevice", wdj::JsonValue::CreateStringValue(m_settings.audioDevice));
         std::string s = to_string(o.Stringify());
         std::ofstream f(SettingsPath().c_str(), std::ios::binary | std::ios::trunc);
         if (f) f.write(s.data(), static_cast<std::streamsize>(s.size()));
@@ -1429,6 +2027,16 @@ private:
 
     fire_and_forget ShowSettings() {
         auto strong = get_strong();
+        // Output devices + current engine audio state are read off the UI thread.
+        co_await winrt::resume_background();
+        hstring devJson = TakeJson(DZAudioDevicesJSON());
+        hstring curDev;
+        if (char* cd = DZCurrentAudioDevice()) { curDev = to_hstring(std::string(cd)); DZFree(cd); }
+        bool curGapless  = DZGapless() != 0;
+        int  curCrossfade = DZCrossfadeMS();
+        co_await resume_foreground(m_win.DispatcherQueue());
+        auto devices = ParseDevices(devJson);
+
         muxc::ContentDialog dlg;
         dlg.XamlRoot(m_win.Content().XamlRoot());
         dlg.Title(box_value(L"Settings"));
@@ -1468,6 +2076,44 @@ private:
         rg.IsOn(DZReplayGain() != 0);
         rsec.Children().Append(rh); rsec.Children().Append(rg);
 
+        // Output device (id "" = system default).
+        muxc::StackPanel asec; asec.Spacing(4);
+        muxc::TextBlock ah; ah.Text(L"Output device"); ah.FontWeight(wut::FontWeights::SemiBold());
+        muxc::ComboBox devCombo; devCombo.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
+        int selDev = 0;
+        for (size_t i = 0; i < devices.size(); ++i) {
+            hstring label = devices[i].name.empty() ? hstring(L"System default") : devices[i].name;
+            if (devices[i].isDefault) label = label + L"  (default)";
+            devCombo.Items().Append(box_value(label));
+            if (devices[i].id == curDev) selDev = static_cast<int>(i);
+        }
+        if (!devices.empty()) devCombo.SelectedIndex(selDev);
+        else { devCombo.IsEnabled(false); devCombo.PlaceholderText(L"No output devices"); }
+        asec.Children().Append(ah); asec.Children().Append(devCombo);
+
+        // Gapless playback (engine state; persisted so it survives relaunch).
+        muxc::StackPanel gsec; gsec.Spacing(4);
+        muxc::TextBlock gh; gh.Text(L"Gapless playback"); gh.FontWeight(wut::FontWeights::SemiBold());
+        muxc::ToggleSwitch gapSwitch;
+        gapSwitch.OnContent(box_value(L"Play consecutive tracks with no silence"));
+        gapSwitch.OffContent(box_value(L"Brief gap between tracks"));
+        gapSwitch.IsOn(curGapless);
+        gsec.Children().Append(gh); gsec.Children().Append(gapSwitch);
+
+        // Crossfade duration (0 / 3 / 6 / 12 s).
+        static const int kCfVals[4] = { 0, 3000, 6000, 12000 };
+        muxc::StackPanel csec; csec.Spacing(4);
+        muxc::TextBlock ch; ch.Text(L"Crossfade"); ch.FontWeight(wut::FontWeights::SemiBold());
+        muxc::ComboBox cfCombo; cfCombo.HorizontalAlignment(mux::HorizontalAlignment::Stretch);
+        cfCombo.Items().Append(box_value(L"Off"));
+        cfCombo.Items().Append(box_value(L"3 seconds"));
+        cfCombo.Items().Append(box_value(L"6 seconds"));
+        cfCombo.Items().Append(box_value(L"12 seconds"));
+        int cfIdx = 0;
+        for (int i = 3; i >= 0; --i) { if (curCrossfade >= kCfVals[i]) { cfIdx = i; break; } }
+        cfCombo.SelectedIndex(cfIdx);
+        csec.Children().Append(ch); csec.Children().Append(cfCombo);
+
         // Background / close-to-tray
         muxc::StackPanel tsec; tsec.Spacing(4);
         muxc::TextBlock th; th.Text(L"Background playback"); th.FontWeight(wut::FontWeights::SemiBold());
@@ -1478,6 +2124,9 @@ private:
         tsec.Children().Append(th); tsec.Children().Append(tray);
 
         sp.Children().Append(qsec);
+        sp.Children().Append(asec);
+        sp.Children().Append(gsec);
+        sp.Children().Append(csec);
         sp.Children().Append(rsec);
         sp.Children().Append(tsec);
         dlg.Content(sp);
@@ -1493,6 +2142,22 @@ private:
             m_settings.replayGain = rg.IsOn();
             DZSetQuality(m_settings.quality); // applies to the NEXT track
             DZSetReplayGain(m_settings.replayGain ? 1 : 0);
+
+            // Output device
+            int di = devCombo.SelectedIndex();
+            if (di >= 0 && di < static_cast<int>(devices.size())) {
+                m_settings.audioDevice = devices[di].id;
+                std::string dev = to_string(devices[di].id);
+                DZSetAudioDevice(dev.data());
+            }
+            // Gapless
+            m_settings.gapless = gapSwitch.IsOn();
+            DZSetGapless(m_settings.gapless ? 1 : 0);
+            // Crossfade
+            int ci = cfCombo.SelectedIndex(); if (ci < 0 || ci > 3) ci = 0;
+            m_settings.crossfadeMs = kCfVals[ci];
+            DZSetCrossfadeMS(m_settings.crossfadeMs);
+
             SaveSettings();
         }
     }
@@ -1503,7 +2168,7 @@ private:
         dlg.XamlRoot(m_win.Content().XamlRoot());
         dlg.Title(box_value(L"About OpenDeezer"));
         muxc::StackPanel sp; sp.Spacing(8);
-        muxc::TextBlock h; h.Text(L"OpenDeezer 0.3.0"); h.FontSize(22); h.FontWeight(wut::FontWeights::SemiBold());
+        muxc::TextBlock h; h.Text(L"OpenDeezer 0.4.0"); h.FontSize(22); h.FontWeight(wut::FontWeights::SemiBold());
         h.Foreground(m_accent);
         muxc::TextBlock tag; tag.Text(L"An open source reimplementation of Deezer."); tag.TextWrapping(mux::TextWrapping::Wrap);
         muxc::TextBlock body; body.TextWrapping(mux::TextWrapping::Wrap);
@@ -1532,7 +2197,7 @@ private:
 
     muxc::NavigationView m_nav{ nullptr };
     muxc::NavigationViewItem m_likedItem{ nullptr }, m_playlistsItem{ nullptr }, m_searchItem{ nullptr },
-                             m_chartsItem{ nullptr },
+                             m_chartsItem{ nullptr }, m_flowItem{ nullptr }, m_podcastsItem{ nullptr },
                              m_settingsItem{ nullptr }, m_aboutItem{ nullptr }, m_lastContentItem{ nullptr };
 
     mux::UIElement m_tracksPage{ nullptr }, m_playlistsPage{ nullptr }, m_searchPage{ nullptr };
@@ -1540,14 +2205,31 @@ private:
     muxc::GridView m_playlistGrid{ nullptr }, m_searchGrid{ nullptr };
     muxc::TextBox  m_searchBox{ nullptr };
 
+    // ---- charts page (sectioned: tracks / albums / artists / playlists) ------
+    mux::UIElement     m_chartsPage{ nullptr };
+    muxc::ScrollViewer m_chartsScroll{ nullptr };
+    muxc::ListView     m_chartsTrackList{ nullptr };
+    muxc::GridView     m_chartsAlbumsGrid{ nullptr }, m_chartsArtistsGrid{ nullptr }, m_chartsPlaylistsGrid{ nullptr };
+    std::vector<Track>      m_chartsTracks;
+    std::vector<Album>      m_chartsAlbums;
+    std::vector<ArtistInfo> m_chartsArtists;
+    std::vector<Playlist>   m_chartsPlaylists;
+
+    // ---- podcasts page -------------------------------------------------------
+    mux::UIElement m_podcastPage{ nullptr };
+    muxc::TextBox  m_podcastBox{ nullptr };
+    muxc::GridView m_podcastGrid{ nullptr };
+    std::vector<Podcast> m_podcasts;
+
     muxc::Image     m_cover{ nullptr };
     muxc::TextBlock m_nowTitle{ nullptr }, m_nowArtist{ nullptr }, m_posText{ nullptr }, m_durText{ nullptr };
     hstring m_curArtist; // base artist line; format badge is appended each tick
     muxc::Slider    m_seek{ nullptr }, m_volume{ nullptr };
-    muxc::Button    m_playBtn{ nullptr }, m_repeatBtn{ nullptr };
+    muxc::Button    m_playBtn{ nullptr }, m_repeatBtn{ nullptr }, m_addBtn{ nullptr };
     muxc::FontIcon  m_playIcon{ nullptr };
-    muxp::ToggleButton m_shuffleBtn{ nullptr };
+    muxp::ToggleButton m_shuffleBtn{ nullptr }, m_likeBtn{ nullptr };
     muxc::HyperlinkButton m_lyricsBtn{ nullptr }, m_artistBtn{ nullptr }; // -> lyrics / artist views
+    bool m_suppressLike = false; // guard programmatic heart resets from OnLike
 
     // ---- lyrics view --------------------------------------------------------
     mux::UIElement      m_lyricsPage{ nullptr };
