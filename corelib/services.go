@@ -10,6 +10,9 @@ package main
 // own queue and are not exposed here.
 
 import (
+	"net"
+	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 	"github.com/Cycl0o0/OpenDeezer/internal/discord"
+	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
 	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
 )
 
@@ -25,6 +29,7 @@ var (
 	servicesOnce sync.Once
 	dp           discord.Presence
 	ctrlSrv      *control.Server
+	advertiser   *discovery.Responder
 	coreVersion  = "1.0.0"
 
 	curMu    sync.Mutex
@@ -85,7 +90,21 @@ func startServices(c *deezer.Client) {
 				ctrlSrv = nil
 			} else {
 				ctrlSrv.SetVersion(coreVersion)
+				ctrlSrv.SetClientInfo(clientID, deviceLabel)
 				odlog.Info("control api on %s", ctrlSrv.Addr())
+				// Advertise on the LAN (OpenDeezer Connect) only when bound to a
+				// reachable (non-loopback) address, so the picker doesn't list a
+				// device nobody else can reach.
+				if !config.IsLoopbackAddr(cfg.Addr) {
+					if _, port, err := net.SplitHostPort(ctrlSrv.Addr()); err == nil {
+						if p, e := strconv.Atoi(port); e == nil {
+							if resp, e := discovery.Advertise(advertInfo, p); e == nil {
+								advertiser = resp
+								odlog.Info("discovery advertising control port %d", p)
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -153,6 +172,40 @@ func engineState() control.State {
 		}
 	}
 	return st
+}
+
+// clientID / deviceLabel identify this GUI on the network. A GUI may override
+// via DZSetClientInfo; otherwise they default to the platform.
+var (
+	clientID    = runtime.GOOS
+	deviceLabel = "OpenDeezer (" + platformName(runtime.GOOS) + ")"
+)
+
+func platformName(goos string) string {
+	switch goos {
+	case "darwin":
+		return "macOS"
+	case "windows":
+		return "Windows"
+	case "linux":
+		return "Linux"
+	default:
+		return goos
+	}
+}
+
+// clientInfo returns the client id + device label (mu-guarded; safe off the
+// responder goroutine).
+func clientInfo() (string, string) {
+	mu.Lock()
+	defer mu.Unlock()
+	return clientID, deviceLabel
+}
+
+// advertInfo is the identity broadcast over LAN discovery.
+func advertInfo() discovery.Info {
+	id, _ := clientInfo()
+	return discovery.Info{Name: engineAccount().Name, Client: id, Version: coreVersion}
 }
 
 func engineAccount() control.Account {

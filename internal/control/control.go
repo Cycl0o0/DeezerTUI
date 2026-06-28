@@ -94,8 +94,10 @@ type Account struct {
 type Whoami struct {
 	Name    string `json:"name"`
 	Offer   string `json:"offer,omitempty"`
-	Auth    string `json:"auth"` // token | account | none
-	Version string `json:"version,omitempty"`
+	Auth    string `json:"auth"`              // token | account | none
+	Version string `json:"version,omitempty"` // OpenDeezer version
+	Client  string `json:"client,omitempty"`  // client/platform id (tui, macos, gnome…)
+	Device  string `json:"device,omitempty"`  // human device label ("OpenDeezer TUI")
 }
 
 // Server serves the control API.
@@ -108,6 +110,8 @@ type Server struct {
 	sameAccount bool
 	addr        string
 	version     string
+	clientID    string // client/platform id (tui, macos, …)
+	device      string // human device label
 	srv         *http.Server
 	ln          net.Listener
 }
@@ -124,6 +128,9 @@ func New(cfg Config, status func() State, account func() Account, cmds Commands,
 
 // SetVersion records the app version reported by /whoami.
 func (s *Server) SetVersion(v string) { s.version = v }
+
+// SetClientInfo records the client/platform id + device label for /whoami.
+func (s *Server) SetClientInfo(client, device string) { s.clientID, s.device = client, device }
 
 // Addr returns the actual listen address (valid after Start).
 func (s *Server) Addr() string {
@@ -142,7 +149,16 @@ func (s *Server) Start() error {
 	s.ln = ln
 	mux := http.NewServeMux()
 	s.routes(mux)
-	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	// Conservative timeouts + a small header cap: this can be LAN-exposed, so
+	// bound every phase of a request to resist slowloris / resource exhaustion.
+	s.srv = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10, // 16 KiB
+	}
 	go func() { _ = s.srv.Serve(ln) }()
 	return nil
 }
@@ -262,7 +278,7 @@ func (s *Server) authMode() string {
 }
 
 func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
-	who := Whoami{Auth: s.authMode(), Version: s.version}
+	who := Whoami{Auth: s.authMode(), Version: s.version, Client: s.clientID, Device: s.device}
 	if s.account != nil {
 		a := s.account()
 		who.Name, who.Offer = a.Name, a.Offer // never the user id (it's the credential)

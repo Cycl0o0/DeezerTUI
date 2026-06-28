@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
+	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -42,7 +44,33 @@ func (m *Model) remoteConnectCmd(addr string) tea.Cmd {
 			return remoteConnMsg{err: err}
 		}
 		st, _ := rc.Status() // best-effort initial snapshot
-		return remoteConnMsg{client: rc, addr: hostport, name: who.Name, state: st}
+		return remoteConnMsg{
+			client: rc, addr: hostport, name: who.Name,
+			clientType: who.Client, version: who.Version, state: st,
+		}
+	}
+}
+
+// discoverDevicesCmd scans the LAN for OpenDeezer Connect devices and enriches
+// each with what it's currently playing (best-effort, needs same-account auth).
+func (m *Model) discoverDevicesCmd() tea.Cmd {
+	token := LoadControl().Token
+	account := m.client.UserID()
+	return func() tea.Msg {
+		devs, _ := discovery.Discover(700 * time.Millisecond)
+		peers := make([]peerDevice, 0, len(devs))
+		for _, d := range devs {
+			np := ""
+			rc := control.NewClient("http://"+d.Addr, token, account)
+			if st, err := rc.Status(); err == nil && st.Track != nil {
+				np = st.Track.Title
+				if st.Track.Artist != "" {
+					np += " — " + st.Track.Artist
+				}
+			}
+			peers = append(peers, peerDevice{dev: d, nowPlaying: np})
+		}
+		return devicesDiscoveredMsg{peers: peers}
 	}
 }
 
@@ -167,8 +195,13 @@ func (m *Model) remoteCtlView() string {
 	if repeat == "" {
 		repeat = "off"
 	}
+	device := deviceTypeLabel(m.remoteClient)
+	if m.remoteVersion != "" {
+		device += " · OpenDeezer v" + m.remoteVersion
+	}
 	lines := []string{
-		"📡 Remote: " + name + "  (" + m.remoteAddr + ")",
+		"📡 Connected to " + name + "  (" + m.remoteAddr + ")",
+		"Device: " + device,
 		"",
 		"State:  " + state,
 		"Track:  " + track,
