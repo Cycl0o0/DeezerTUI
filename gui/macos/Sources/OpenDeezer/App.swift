@@ -25,6 +25,13 @@ struct OpenDeezerApp: App {
                 Button("Settings…") { app.showSettings = true }
                     .keyboardShortcut(",", modifiers: .command)
             }
+            // Re-open the existing Deezer login flow on demand so an already
+            // signed-in user can re-authenticate or switch accounts. Reuses the
+            // web-login + manual-ARL sheet (beginWebLogin → DeezerLoginSheet),
+            // which runs DZInit and refreshes the session on success.
+            CommandGroup(after: .appSettings) {
+                Button("Log in / Switch account…") { app.beginWebLogin() }
+            }
         }
     }
 }
@@ -188,6 +195,12 @@ struct AccountRow: View {
                     .font(.system(size: 11)).foregroundStyle(DZ.textSec).lineLimit(1)
             }
             Spacer()
+            // Re-open the existing Deezer login sheet to re-authenticate or
+            // switch accounts (same path used at first launch).
+            Button { app.beginWebLogin() } label: {
+                Image(systemName: "person.crop.circle.badge.plus").foregroundStyle(DZ.textSec)
+            }
+            .buttonStyle(.plain).help("Log in / Switch account…")
             Button { app.showSettings = true } label: {
                 Image(systemName: "gearshape").foregroundStyle(DZ.textSec)
             }

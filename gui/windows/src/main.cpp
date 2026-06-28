@@ -537,8 +537,13 @@ private:
         m_nav.MenuItems().Append(m_podcastsItem);
         m_nav.MenuItems().Append(m_searchItem);
 
+        // Account: re-open the EXISTING login chooser on demand so an already
+        // (auto-)logged-in user can re-authenticate or switch accounts. Handled
+        // like Settings/About in OnNav (a modal action, not a page).
+        m_accountItem  = NavItem(L"Log in / Switch account…", muxc::Symbol::Contact, L"account");
         m_settingsItem = NavItem(L"Settings", muxc::Symbol::Setting, L"settings");
         m_aboutItem    = NavItem(L"About",    muxc::Symbol::Help,    L"about");
+        m_nav.FooterMenuItems().Append(m_accountItem);
         m_nav.FooterMenuItems().Append(m_settingsItem);
         m_nav.FooterMenuItems().Append(m_aboutItem);
 
@@ -1148,9 +1153,14 @@ private:
         auto item = args.SelectedItem().try_as<muxc::NavigationViewItem>();
         if (!item) return;
         auto tag = unbox_value_or<hstring>(item.Tag(), L"");
-        // About / Settings are modal dialogs, not pages: open then revert selection.
-        if (tag == L"about" || tag == L"settings") {
-            if (tag == L"about") ShowAbout(); else ShowSettings();
+        // About / Settings / Account are modal actions, not pages: open then
+        // revert selection. "account" re-opens the EXISTING login chooser
+        // (web-login + manual-ARL) so the user can re-auth / switch accounts;
+        // on success TryLogin -> FinishLogin reflects the new account.
+        if (tag == L"about" || tag == L"settings" || tag == L"account") {
+            if (tag == L"about")          ShowAbout();
+            else if (tag == L"settings")  ShowSettings();
+            else                          ShowLoginChoice();
             m_suppressNav = true;
             nav.SelectedItem(m_lastContentItem ? m_lastContentItem : m_likedItem);
             m_suppressNav = false;
@@ -2332,7 +2342,8 @@ private:
     muxc::NavigationView m_nav{ nullptr };
     muxc::NavigationViewItem m_likedItem{ nullptr }, m_playlistsItem{ nullptr }, m_searchItem{ nullptr },
                              m_chartsItem{ nullptr }, m_flowItem{ nullptr }, m_podcastsItem{ nullptr },
-                             m_settingsItem{ nullptr }, m_aboutItem{ nullptr }, m_lastContentItem{ nullptr };
+                             m_accountItem{ nullptr }, m_settingsItem{ nullptr }, m_aboutItem{ nullptr },
+                             m_lastContentItem{ nullptr };
 
     mux::UIElement m_tracksPage{ nullptr }, m_playlistsPage{ nullptr }, m_searchPage{ nullptr };
     muxc::ListView m_trackList{ nullptr }, m_searchTrackList{ nullptr };
