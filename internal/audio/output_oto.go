@@ -1,4 +1,4 @@
-//go:build otosink
+//go:build darwin
 
 package audio
 
@@ -9,9 +9,10 @@ import (
 )
 
 // otoOutput drives playback through oto (AudioToolbox on macOS via purego). Used
-// for the macOS GUI, where malgo's CoreAudio data callback runs unreliably inside
-// the c-archive (choppy playback) — oto's pull model is smooth there. The cost is
-// no output-device selection (oto plays the system default only).
+// on ALL macOS builds (TUI + GUIs): malgo's CoreAudio data callback is unreliable
+// here (choppy playback, especially in the c-archive GUI) — oto's pull model is
+// smooth. The cost is no output-device selection (oto = system default only);
+// Linux/Windows use malgo and keep selection.
 type otoOutput struct {
 	ctx    *oto.Context
 	player *oto.Player

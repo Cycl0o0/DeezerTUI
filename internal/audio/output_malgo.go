@@ -1,4 +1,4 @@
-//go:build !otosink
+//go:build !darwin
 
 package audio
 
