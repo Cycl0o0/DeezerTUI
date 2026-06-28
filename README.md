@@ -186,6 +186,22 @@ Tools: `get_status`, `play_pause`, `next`, `prev`, `stop`, `restart`,
 `cycle_repeat`, `toggle_shuffle`, `set_volume`, `seek`, `search`,
 `list_playlists`, `play_track`, `play_playlist`.
 
+## Discord Rich Presence
+
+Show what you're listening to on your Discord profile. **Off by default** — it
+needs a Discord application id (create one at the [Discord Developer
+Portal](https://discord.com/developers/applications); optionally upload an art
+asset named `opendeezer`):
+
+```sh
+export OPENDEEZER_DISCORD_APP_ID=your-application-id
+# or: echo your-application-id > ~/.config/opendeezer/discord-app-id.txt
+```
+
+With Discord running, your now-playing track appears as "Listening to …" with a
+live progress bar. macOS/Linux only (Windows pending). If Discord isn't running
+it's silently skipped.
+
 ## How it works
 
 ```

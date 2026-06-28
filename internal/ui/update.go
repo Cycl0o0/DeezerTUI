@@ -344,6 +344,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.media != nil {
 				m.media.Close()
 			}
+			if m.discord != nil {
+				m.discord.Close()
+			}
 			if m.ctrl != nil {
 				m.ctrl.Close()
 			}
@@ -389,6 +392,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.player.Stop()
 		if m.media != nil {
 			m.media.Close()
+		}
+		if m.discord != nil {
+			m.discord.Close()
 		}
 		if m.ctrl != nil {
 			m.ctrl.Close()
