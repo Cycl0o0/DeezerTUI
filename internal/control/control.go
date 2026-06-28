@@ -25,6 +25,7 @@ package control
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strconv"
@@ -142,6 +143,13 @@ func (s *Server) Addr() string {
 
 // Start binds the port and serves in a background goroutine.
 func (s *Server) Start() error {
+	// Fail closed: never serve unauthenticated ("none" mode) on a non-loopback
+	// address — a config mistake (e.g. OPENDEEZER_CONTROL_SAMEACCOUNT=0 on a LAN
+	// bind) must not silently expose playback + private playlists to the LAN.
+	if s.token == "" && !s.sameAccount && !isLoopbackAddr(s.addr) {
+		return errors.New("control: refusing to serve unauthenticated on a non-loopback address; " +
+			"set OPENDEEZER_CONTROL_TOKEN or keep same-account auth enabled")
+	}
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return err
@@ -248,13 +256,32 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 		case s.sameAccount:
 			want := s.accountID()
 			got := r.Header.Get("X-OpenDeezer-Account")
-			if want == "" || got != want {
+			// Constant-time compare (defense-in-depth; the id is only semi-secret).
+			if want == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 				http.Error(w, `{"error":"account mismatch"}`, http.StatusUnauthorized)
 				return
 			}
 		}
 		h(w, r)
 	}
+}
+
+// isLoopbackAddr reports whether a host:port binds only the loopback interface.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	switch host {
+	case "", "0.0.0.0", "::":
+		return false // wildcard = all interfaces
+	case "localhost":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // accountID is our logged-in Deezer user id ("" if unknown / not logged in).

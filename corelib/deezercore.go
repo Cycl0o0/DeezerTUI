@@ -146,8 +146,8 @@ func DZFreeBytes(p *C.uchar) { C.free(unsafe.Pointer(p)) }
 
 //export DZInit
 func DZInit(arl *C.char) C.int {
+	// One-time, non-network setup under the lock.
 	mu.Lock()
-	defer mu.Unlock()
 	// This (the c-archive) is embedded in the native GUI processes. The realtime
 	// audio callback re-enters Go from CoreAudio's thread; frequent GC there can
 	// delay it and cause choppy playback (the standalone TUI doesn't show this).
@@ -160,6 +160,7 @@ func DZInit(arl *C.char) C.int {
 	if player == nil {
 		p, err := audio.NewPlayer()
 		if err != nil {
+			mu.Unlock()
 			return 0
 		}
 		player = p
@@ -169,15 +170,22 @@ func DZInit(arl *C.char) C.int {
 			mu.Unlock()
 		})
 	}
-	client = deezer.New(C.GoString(arl))
-	if err := client.Login(); err != nil {
+	mu.Unlock()
+
+	// Login is a network round-trip (up to 30s): do it WITHOUT holding mu, so it
+	// can't block every other engine call meanwhile.
+	c := deezer.New(C.GoString(arl))
+	if err := c.Login(); err != nil {
 		odlog.Warn("login failed: %v", err)
 		return 0
 	}
-	odlog.Info("logged in: %s (%s)", client.Account().Name, client.Account().Offer)
-	// Start engine-hosted services (Discord RP + control API) once. Pass the
-	// just-created client so startServices doesn't re-lock mu (we hold it here).
-	startServices(client)
+	mu.Lock()
+	client = c
+	mu.Unlock()
+
+	odlog.Info("logged in: %s (%s)", c.Account().Name, c.Account().Offer)
+	// Start engine-hosted services (Discord RP + control API) once.
+	startServices(c)
 	return 1
 }
 

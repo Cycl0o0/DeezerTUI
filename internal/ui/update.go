@@ -430,7 +430,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.loading = true
 			m.status = "Connecting…"
-			return m, m.remoteConnectCmd(m.search.Value())
+			return m, m.remoteConnectCmd(m.search.Value(), true) // manual: trusted, may use token
 		}
 		var cmd tea.Cmd
 		m.search, cmd = m.search.Update(msg)
@@ -739,7 +739,7 @@ func (m *Model) activate() (tea.Model, tea.Cmd) {
 	case rowPeer:
 		m.loading = true
 		m.status = "Connecting to " + it.title + "…"
-		return m, m.remoteConnectCmd(it.peerAddr)
+		return m, m.remoteConnectCmd(it.peerAddr, false) // discovered: account-only
 	}
 	return m, nil
 }

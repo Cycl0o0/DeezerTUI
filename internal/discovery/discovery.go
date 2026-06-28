@@ -119,7 +119,9 @@ func Discover(timeout time.Duration) ([]Device, error) {
 			break // deadline
 		}
 		var rep reply
-		if json.Unmarshal(buf[:n], &rep) != nil || rep.Magic != replyMagic || rep.Port <= 0 {
+		// Bound the port to a valid range: a forged reply must not reach itoa with
+		// an out-of-range value (which would overflow its fixed buffer).
+		if json.Unmarshal(buf[:n], &rep) != nil || rep.Magic != replyMagic || rep.Port <= 0 || rep.Port > 65535 {
 			continue
 		}
 		addr := net.JoinHostPort(src.IP.String(), itoa(rep.Port))

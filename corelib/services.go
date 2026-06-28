@@ -70,14 +70,13 @@ func fetchTrackMeta(c *deezer.Client, id string) {
 }
 
 // startServices starts Discord RP + the control API once, after a successful
-// login. Safe to call from DZInit (which holds mu): it only sets up + spawns
-// goroutines and never locks mu synchronously (the just-logged-in client is
-// passed in; the closures read the globals lazily, off the HTTP goroutine).
+// login. The just-logged-in client is passed in; closures read globals lazily.
 func startServices(c *deezer.Client) {
 	servicesOnce.Do(func() {
 		dp = discord.New(config.LoadDiscordAppID())
 
 		if cfg := config.LoadControl(); cfg.Enabled {
+			id, dev := clientInfo()
 			ctrlSrv = control.New(
 				control.Config{Addr: cfg.Addr, Token: cfg.Token, SameAccountOnly: cfg.SameAccount},
 				engineState,
@@ -85,16 +84,21 @@ func startServices(c *deezer.Client) {
 				engineCommands(),
 				c,
 			)
+			// Set identity BEFORE Start so the serving goroutine never races these.
+			ctrlSrv.SetVersion(coreVersion)
+			ctrlSrv.SetClientInfo(id, dev)
+			if cfg.SameAccount && cfg.Token == "" {
+				odlog.Warn("control api: LAN-exposed with same-account auth only; the Deezer " +
+					"user id is not a strong secret. Set OPENDEEZER_CONTROL_TOKEN for a real " +
+					"credential on untrusted networks.")
+			}
 			if err := ctrlSrv.Start(); err != nil {
 				odlog.Warn("control api: %v", err)
 				ctrlSrv = nil
 			} else {
-				ctrlSrv.SetVersion(coreVersion)
-				ctrlSrv.SetClientInfo(clientID, deviceLabel)
 				odlog.Info("control api on %s", ctrlSrv.Addr())
 				// Advertise on the LAN (OpenDeezer Connect) only when bound to a
-				// reachable (non-loopback) address, so the picker doesn't list a
-				// device nobody else can reach.
+				// reachable (non-loopback) address.
 				if !config.IsLoopbackAddr(cfg.Addr) {
 					if _, port, err := net.SplitHostPort(ctrlSrv.Addr()); err == nil {
 						if p, e := strconv.Atoi(port); e == nil {

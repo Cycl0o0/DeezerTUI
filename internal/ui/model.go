@@ -16,6 +16,7 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 	"github.com/Cycl0o0/OpenDeezer/internal/discord"
 	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
+	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
 	"github.com/Cycl0o0/OpenDeezer/internal/mpris"
 	"github.com/Cycl0o0/OpenDeezer/internal/queue"
 
@@ -220,6 +221,10 @@ func (m *Model) StartControl(send func(tea.Msg)) error {
 	cfg := LoadControl()
 	if !cfg.Enabled {
 		return nil
+	}
+	if cfg.SameAccount && cfg.Token == "" {
+		odlog.Warn("control api: LAN-exposed with same-account auth only; the Deezer user id " +
+			"is not a strong secret. Set OPENDEEZER_CONTROL_TOKEN for a real credential.")
 	}
 	cmds := control.Commands{
 		PlayPause:     func() { send(controlCmdMsg{kind: "playpause"}) },

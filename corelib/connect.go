@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
-	"github.com/Cycl0o0/OpenDeezer/internal/config"
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
 	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
 	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
@@ -84,7 +83,10 @@ func DZConnectDevice(addr *C.char) C.int {
 	if c == nil || a == "" {
 		return 0
 	}
-	rc := control.NewClient("http://"+a, config.LoadControl().Token, c.UserID())
+	// Authenticate to discovered devices with the (non-secret) account id only —
+	// never the control token: a discovery reply is unauthenticated and spoofable,
+	// so sending the shared token would leak it to an attacker's fake device.
+	rc := control.NewClient("http://"+a, "", c.UserID())
 	if _, err := rc.Whoami(); err != nil {
 		odlog.Warn("connect %s: %v", a, err)
 		return 0
@@ -157,10 +159,13 @@ func remotePoller(rc *control.Client, stop chan struct{}) {
 }
 
 // setRemoteState caches a status returned by a command (so the UI updates
-// without waiting for the next poll).
+// without waiting for the next poll). No-op if we've since disconnected, so a
+// late command response can't resurrect stale remote state.
 func setRemoteState(st control.State) {
 	mu.Lock()
-	remoteSt = st
+	if remoteCli != nil {
+		remoteSt = st
+	}
 	mu.Unlock()
 }
 
