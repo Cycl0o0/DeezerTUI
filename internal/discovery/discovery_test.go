@@ -37,7 +37,7 @@ func TestResponderRepliesToProbeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// A non-probe packet must be ignored (no reply -> read times out).
 	_, _ = conn.Write([]byte("garbage"))

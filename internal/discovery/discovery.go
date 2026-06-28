@@ -102,7 +102,7 @@ func Discover(timeout time.Duration) ([]Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	dst := &net.UDPAddr{IP: net.IPv4bcast, Port: Port}
 	if _, err := conn.WriteToUDP([]byte(probeMagic), dst); err != nil {

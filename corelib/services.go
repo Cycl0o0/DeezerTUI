@@ -29,7 +29,6 @@ var (
 	servicesOnce sync.Once
 	dp           discord.Presence
 	ctrlSrv      *control.Server
-	advertiser   *discovery.Responder
 	coreVersion  = "1.0.0"
 
 	curMu    sync.Mutex
@@ -102,8 +101,7 @@ func startServices(c *deezer.Client) {
 				if !config.IsLoopbackAddr(cfg.Addr) {
 					if _, port, err := net.SplitHostPort(ctrlSrv.Addr()); err == nil {
 						if p, e := strconv.Atoi(port); e == nil {
-							if resp, e := discovery.Advertise(advertInfo, p); e == nil {
-								advertiser = resp
+							if _, e := discovery.Advertise(advertInfo, p); e == nil {
 								odlog.Info("discovery advertising control port %d", p)
 							}
 						}
