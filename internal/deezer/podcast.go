@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
+	"strings"
 )
 
 // SearchPodcasts finds shows via the public REST /search/podcast endpoint.
@@ -75,15 +77,25 @@ func (c *Client) PodcastEpisodeStream(episodeID string) (*StreamPlan, error) {
 		return nil, err
 	}
 	var r struct {
-		Results struct {
-			URL string `json:"EPISODE_DIRECT_STREAM_URL"`
-		} `json:"results"`
+		Results map[string]json.RawMessage `json:"results"`
 	}
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, err
 	}
-	if r.Results.URL == "" {
-		return nil, fmt.Errorf("episode %s: no stream url", episodeID)
+	// The direct (DRM-free) MP3 URL field name has varied; try the known ones.
+	for _, k := range []string{"EPISODE_DIRECT_STREAM_URL", "DIRECT_STREAM_URL", "EPISODE_STREAM_URL", "MEDIA_URL"} {
+		if raw, ok := r.Results[k]; ok {
+			var u string
+			if json.Unmarshal(raw, &u) == nil && u != "" {
+				return &StreamPlan{CDNURL: u, TrackID: episodeID, Format: "MP3", Encrypted: false}, nil
+			}
+		}
 	}
-	return &StreamPlan{CDNURL: r.Results.URL, TrackID: episodeID, Format: "MP3", Encrypted: false}, nil
+	// Diagnostic: report the keys gw returned so the right field can be wired.
+	keys := make([]string, 0, len(r.Results))
+	for k := range r.Results {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return nil, fmt.Errorf("episode %s: no direct stream url (gw keys: %s)", episodeID, strings.Join(keys, ","))
 }
