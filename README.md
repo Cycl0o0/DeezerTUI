@@ -8,7 +8,7 @@ streamed, Blowfish stripe-decrypted, decoded and played **locally**, in memory
 it makes to Deezer.
 
 One Go engine does the whole streaming path (login, decrypt, decode, playback);
-six native front-ends sit on top of it. By **Cycl0o0**.
+seven native front-ends sit on top of it. By **Cycl0o0**.
 
 ## Clients
 
@@ -20,6 +20,7 @@ six native front-ends sit on top of it. By **Cycl0o0**.
 | **GNOME** | GTK4 · libadwaita | x86_64 · aarch64 `gui/gnome` |
 | **KDE** | Qt6 Widgets · Breeze | x86_64 · aarch64 `gui/kde` |
 | **Windows** | WinUI 3 · C++/WinRT · Fluent | x64 `gui/windows` |
+| **Android** | Kotlin · Jetpack Compose | arm64/arm/x86_64 (gomobile AAR) `gui/android` |
 
 The **unified Linux** client is one `opendeezer` command that auto-selects the
 native toolkit for your desktop (Qt/Breeze on KDE-family, GTK4/libadwaita
@@ -98,6 +99,8 @@ access to your account.
 - **Windows GUI**: Windows 10 1809+/11, Visual Studio 2022 + Windows App SDK,
   MinGW-w64 (Go cgo builds the engine DLL), and the Edge **WebView2** runtime
   (preinstalled on Windows 11) for the login web view.
+- **Android**: Android 7.0+ (API 24). Building needs JDK 17, the Android SDK +
+  NDK, and gomobile.
 - TUI album art needs a 256-color or truecolor terminal.
 
 ## TUI controls
@@ -270,6 +273,8 @@ ARL ─login (gw-light)→ browse (gw + public REST): search, charts, artists,
 - `internal/ui` — the Bubble Tea TUI.
 - `corelib` — the engine exposed as a C ABI (`-buildmode=c-archive` for
   macOS/Linux, `-buildmode=c-shared` DLL for Windows) so the native GUIs link it.
+- `mobile` — the engine exposed for **gomobile** (`Odmobile` AAR) so the Android
+  app drives it from Kotlin.
 
 ## Build from source
 
@@ -306,6 +311,12 @@ cd gui/kde   && ./build.sh && ./opendeezer-kde       # Qt6 / Breeze
 MinGW-w64 (Go cgo), Go:
 ```powershell
 cd gui\windows; .\build.ps1     # -> bin\x64\Release\OpenDeezer.exe
+```
+
+**Android app** — Go, JDK 17, Android SDK + NDK, and gomobile. `build.sh` binds
+the engine to an `Odmobile` AAR, then Gradle assembles the APK:
+```sh
+cd gui/android && ./build.sh    # -> app/build/outputs/apk/debug/*.apk
 ```
 
 ## FAQ
