@@ -4,28 +4,17 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/Cycl0o0/OpenDeezer/internal/config"
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
 	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// normalizePeer turns user input ("host", "host:port", "http://host:port") into
-// a base URL + host:port, defaulting the port to 7654.
+// normalizePeer turns user input into a base URL + host:port (default port 7654).
 func normalizePeer(addr string) (base, hostport string) {
-	addr = strings.TrimSpace(addr)
-	addr = strings.TrimPrefix(addr, "http://")
-	addr = strings.TrimPrefix(addr, "https://")
-	addr = strings.TrimRight(addr, "/")
-	if addr == "" {
-		return "", ""
-	}
-	if !strings.Contains(addr, ":") {
-		addr += ":7654"
-	}
-	return "http://" + addr, addr
+	return config.NormalizePeer(addr)
 }
 
 // remoteConnectCmd connects to a peer's control API: verify with /whoami, grab
@@ -69,6 +58,7 @@ func (m *Model) discoverDevicesCmd() tea.Cmd {
 	}
 	return func() tea.Msg {
 		devs, _ := discovery.Discover(700*time.Millisecond, selfPort)
+		devs = mergeConfiguredPeers(devs, account)
 		peers := make([]peerDevice, 0, len(devs))
 		for _, d := range devs {
 			np := ""
@@ -84,6 +74,36 @@ func (m *Model) discoverDevicesCmd() tea.Cmd {
 		}
 		return devicesDiscoveredMsg{peers: peers}
 	}
+}
+
+// mergeConfiguredPeers adds manually-listed peers (config) not found by discovery
+// — querying each /whoami for name/type/version. Lets Connect reach peers over
+// unicast-only networks (Tailscale/VPN) with no multicast/broadcast.
+func mergeConfiguredPeers(devs []discovery.Device, account string) []discovery.Device {
+	peers := config.LoadPeers()
+	if len(peers) == 0 {
+		return devs
+	}
+	seen := map[string]bool{}
+	for _, d := range devs {
+		seen[d.Addr] = true
+	}
+	for _, p := range peers {
+		base, hp := config.NormalizePeer(p)
+		if base == "" || seen[hp] {
+			continue
+		}
+		seen[hp] = true
+		name, client, version := hp, "", ""
+		if who, err := control.NewClient(base, "", account).Whoami(); err == nil {
+			if who.Name != "" {
+				name = who.Name
+			}
+			client, version = who.Client, who.Version
+		}
+		devs = append(devs, discovery.Device{Name: name, Addr: hp, Client: client, Version: version})
+	}
+	return devs
 }
 
 // remotePollCmd fetches the peer's current status.

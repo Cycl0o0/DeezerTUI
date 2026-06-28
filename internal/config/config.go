@@ -98,6 +98,46 @@ func isLoopbackAddr(addr string) bool {
 	return false
 }
 
+// LoadPeers returns manually-configured Connect peer addresses (host[:port]),
+// from $OPENDEEZER_CONNECT_PEERS (comma-separated) and
+// ~/.config/opendeezer/connect-peers.txt (one per line). These are merged into
+// the device picker alongside LAN discovery, so Connect works over networks that
+// carry no multicast/broadcast (e.g. Tailscale/VPN — unicast-only meshes).
+func LoadPeers() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" && !strings.HasPrefix(s, "#") && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, p := range strings.Split(os.Getenv("OPENDEEZER_CONNECT_PEERS"), ",") {
+		add(p)
+	}
+	for _, line := range strings.Split(readFile("connect-peers.txt"), "\n") {
+		add(line)
+	}
+	return out
+}
+
+// NormalizePeer turns user input ("host", "host:port", "http://host:port") into
+// a base URL + host:port, defaulting the port to 7654. Returns ("","") if empty.
+func NormalizePeer(addr string) (base, hostport string) {
+	addr = strings.TrimSpace(addr)
+	addr = strings.TrimPrefix(addr, "http://")
+	addr = strings.TrimPrefix(addr, "https://")
+	addr = strings.TrimRight(addr, "/")
+	if addr == "" {
+		return "", ""
+	}
+	if !strings.Contains(addr, ":") {
+		addr += ":7654"
+	}
+	return "http://" + addr, addr
+}
+
 // LoadDiscordAppID returns the Discord application id for Rich Presence, from
 // $OPENDEEZER_DISCORD_APP_ID or ~/.config/opendeezer/discord-app-id.txt. Empty
 // disables the feature.

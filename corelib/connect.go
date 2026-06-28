@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
+	"github.com/Cycl0o0/OpenDeezer/internal/config"
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
 	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
 	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
@@ -108,7 +109,44 @@ func DZDiscoverDevices(timeoutMS C.int) *C.char {
 	if devs == nil {
 		devs = []discovery.Device{}
 	}
+	devs = mergeConfiguredPeers(devs)
 	return jsonStr(devs, err)
+}
+
+// mergeConfiguredPeers adds manually-listed peers (config) not already found by
+// discovery — querying each /whoami for its name/type/version. Lets Connect work
+// over unicast-only networks (Tailscale/VPN) that carry no multicast/broadcast.
+func mergeConfiguredPeers(devs []discovery.Device) []discovery.Device {
+	peers := config.LoadPeers()
+	if len(peers) == 0 {
+		return devs
+	}
+	seen := map[string]bool{}
+	for _, d := range devs {
+		seen[d.Addr] = true
+	}
+	uid := ""
+	if c := curClient(); c != nil {
+		uid = c.UserID()
+	}
+	for _, p := range peers {
+		base, hp := config.NormalizePeer(p)
+		if base == "" || seen[hp] {
+			continue
+		}
+		seen[hp] = true
+		who, err := control.NewClient(base, "", uid).Whoami()
+		name := hp
+		client, version := "", ""
+		if err == nil {
+			if who.Name != "" {
+				name = who.Name
+			}
+			client, version = who.Client, who.Version
+		}
+		devs = append(devs, discovery.Device{Name: name, Addr: hp, Client: client, Version: version})
+	}
+	return devs
 }
 
 // DZConnectDevice routes playback to the device at addr (host:port). Local

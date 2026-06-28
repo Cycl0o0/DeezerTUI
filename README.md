@@ -183,6 +183,21 @@ target's `host:port`, and connect. Transport keys (space/n/p/s, ←/→ seek, +/
 volume, r/z) drive the remote; the screen shows its live now-playing. Same
 Deezer account auto-authenticates (or share a token).
 
+**OpenDeezer Connect** (GUIs + TUI) auto-discovers devices on the same LAN via
+UDP multicast/broadcast. That needs a network that carries multicast/broadcast —
+**Tailscale/VPN meshes don't** (they're unicast-only), and some routers filter it
+between Wi-Fi and Ethernet. For those, list peers explicitly so they always show
+in the picker:
+
+```sh
+# one host[:port] per line (port defaults to 7654)
+#   ~/.config/opendeezer/connect-peers.txt   (also read on macOS)
+echo "100.78.213.67:7654" >> ~/.config/opendeezer/connect-peers.txt
+# or: export OPENDEEZER_CONNECT_PEERS=100.78.213.67:7654,192.168.1.20
+```
+
+(You can always just type the address into "Enter address…" too.)
+
 ### MCP server (AI agent control)
 
 `opendeezer-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
