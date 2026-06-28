@@ -53,6 +53,7 @@ const (
 	frameBytes  = channels * 2 // s16 stereo
 	bytesPerSec = sampleRate * frameBytes
 	ringMax     = 4 * bytesPerSec // ~4s of decoded PCM buffered (headroom vs underrun)
+	prebufferB  = 2 * bytesPerSec // fill ~2s before starting (clean intro, no underrun burst)
 	decodeChunk = 16 * 1024
 )
 
@@ -329,7 +330,9 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 	if oldNext != nil {
 		oldNext.kill()
 	}
-	p.state.Store(int32(Playing))
+	// Stay Loading; the manager flips to Playing once the ring is prebuffered, so
+	// the callback never pulls from a half-filled ring (which caused a burst of
+	// underruns — a choppy intro — at the start of every track).
 	return nil
 }
 
@@ -364,8 +367,17 @@ func (p *Player) manage() {
 					if cur := p.cur.Load(); cur != nil {
 						rb = cur.ring.buffered()
 					}
-					odlog.Info("audio: callbacks=%d underruns=%d ringBuf=%dKB state=%v",
+					odlog.Debug("audio: callbacks=%d underruns=%d ringBuf=%dKB state=%v",
 						c, p.cbUnderrun.Load(), rb/1024, p.State())
+				}
+			}
+			// Prebuffer: promote Loading -> Playing once the ring has filled (or
+			// the track is short/decoded), so the callback starts from a healthy
+			// ring instead of underrunning while it fills.
+			if State(p.state.Load()) == Loading {
+				if cur := p.cur.Load(); cur != nil &&
+					(cur.ring.buffered() >= prebufferB || cur.eof.Load()) {
+					p.state.Store(int32(Playing))
 				}
 			}
 			if State(p.state.Load()) != Playing {
@@ -584,7 +596,7 @@ func (s *source) decode() {
 			// assumes the decoder matches. A mismatch here (rate != 44100, or a
 			// mono source) would make MP3 playback sound choppy/wrong while FLAC
 			// (always 44100, mono duplicated to stereo) stays fine.
-			odlog.Info("mp3 decode: sampleRate=%d deviceRate=%d format=%s", md.SampleRate(), sampleRate, s.format)
+			odlog.Debug("mp3 decode: sampleRate=%d deviceRate=%d format=%s", md.SampleRate(), sampleRate, s.format)
 			dec = md
 		}
 	}
