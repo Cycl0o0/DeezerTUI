@@ -238,6 +238,24 @@ func isLoopbackAddr(addr string) bool {
 	return false
 }
 
+// LoadDiscordAppID returns the Discord application id for Rich Presence, from
+// $OPENDEEZER_DISCORD_APP_ID or ~/.config/opendeezer/discord-app-id.txt. Empty
+// disables the feature.
+func LoadDiscordAppID() string {
+	if v := strings.TrimSpace(os.Getenv("OPENDEEZER_DISCORD_APP_ID")); v != "" {
+		return v
+	}
+	dir, err := configDir()
+	if err != nil {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "discord-app-id.txt"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // LoadAudioDevice / SaveAudioDevice persist the selected output device id.
 func LoadAudioDevice() string {
 	dir, err := configDir()

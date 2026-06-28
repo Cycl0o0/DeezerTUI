@@ -11,6 +11,7 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
+	"github.com/Cycl0o0/OpenDeezer/internal/discord"
 	"github.com/Cycl0o0/OpenDeezer/internal/mpris"
 	"github.com/Cycl0o0/OpenDeezer/internal/queue"
 
@@ -71,7 +72,8 @@ type Model struct {
 	searchPodcast bool           // search screen is in podcast mode
 	episodeMode   bool           // current queue is podcast episodes (plain streams)
 
-	media mpris.Controller // OS media controls (MPRIS on Linux, no-op elsewhere)
+	media   mpris.Controller // OS media controls (MPRIS on Linux, no-op elsewhere)
+	discord discord.Presence // Discord Rich Presence (no-op if no app id)
 
 	ctrl      *control.Server                 // control API (remote + MCP); nil if disabled
 	ctrlState atomic.Pointer[control.State]   // playback snapshot read by the control HTTP goroutine
@@ -118,6 +120,7 @@ func (m *Model) StartMedia(send func(tea.Msg)) {
 
 // publishMedia pushes the current now-playing state to the desktop.
 func (m *Model) publishMedia() {
+	m.publishDiscord()
 	if m.media == nil {
 		return
 	}
@@ -140,6 +143,31 @@ func (m *Model) publishMedia() {
 	}
 	s.PositionUS = m.player.PositionMS() * 1000
 	m.media.Update(s)
+}
+
+// publishDiscord pushes the now-playing track to Discord Rich Presence. No-op
+// when no app id is configured.
+func (m *Model) publishDiscord() {
+	if m.discord == nil {
+		return
+	}
+	var ds discord.State
+	switch m.player.State() {
+	case audio.Playing:
+		ds.Status = "playing"
+	case audio.Paused:
+		ds.Status = "paused"
+	default:
+		ds.Status = "stopped"
+	}
+	if t, ok := m.q.Current(); ok {
+		ds.Title = t.Name
+		ds.Artist = t.ArtistLine()
+		ds.Album = t.AlbumName
+		ds.DurationMS = t.DurationMS
+	}
+	ds.PositionMS = m.player.PositionMS()
+	m.discord.Update(ds)
 }
 
 // StartControl starts the control API (remote control + MCP) if enabled in the
@@ -282,6 +310,7 @@ func New(client *deezer.Client, player *audio.Player) *Model {
 		default:
 		}
 	})
+	m.discord = discord.New(LoadDiscordAppID())
 	m.applyThemeByName(LoadTheme())
 	player.SetReplayGain(LoadReplayGain())
 	player.SetGapless(LoadGapless())
