@@ -3431,7 +3431,9 @@ static void init_done(GObject *src, GAsyncResult *res, gpointer data) {
     load_account(APP);                         /* tier + entitlements (toasts name · offer) */
     if (!(APP->acct_name && *APP->acct_name))
       toast(APP, "Connected to Deezer");       /* fallback when account info is unavailable */
-    load_playlists_async(APP);
+    /* refresh (not just append) so switching accounts replaces the previous
+     * account's playlists instead of stacking the new ones underneath */
+    sidebar_refresh_playlists(APP);
     /* select Liked Songs (row 0) → triggers the favorites load */
     GtkListBoxRow *row = gtk_list_box_get_row_at_index(APP->sidebar, 0);
     gtk_list_box_select_row(APP->sidebar, row);
@@ -3504,6 +3506,15 @@ static void on_about(GSimpleAction *action, GVariant *param, gpointer data) {
 static void on_quit(GSimpleAction *action, GVariant *param, gpointer data) {
   (void)action; (void)param;
   g_application_quit(G_APPLICATION(data));
+}
+
+/* Open the existing login flow on demand so an already-signed-in user can
+ * re-authenticate or switch accounts. Reuses open_login_window() verbatim: the
+ * web-login + manual-ARL choose page, and init_done() applies the new account on
+ * success (persists arl.txt, reloads tier/playlists, reselects Liked Songs). */
+static void on_login(GSimpleAction *action, GVariant *param, gpointer data) {
+  (void)action; (void)param; (void)data;
+  open_login_window(APP);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3760,8 +3771,13 @@ static void on_activate(GApplication *app, gpointer data) {
   g_object_unref(settings_act);
   const char *settings_accels[] = {"<Ctrl>comma", NULL};
   gtk_application_set_accels_for_action(GTK_APPLICATION(app), "app.settings", settings_accels);
+  GSimpleAction *login_act = g_simple_action_new("login", NULL);
+  g_signal_connect(login_act, "activate", G_CALLBACK(on_login), NULL);
+  g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(login_act));
+  g_object_unref(login_act);
 
   GMenu *menu = g_menu_new();
+  g_menu_append(menu, "Log in / Switch account…", "app.login");
   g_menu_append(menu, "Settings", "app.settings");
   g_menu_append(menu, "About OpenDeezer", "app.about");
   g_menu_append(menu, "Quit", "app.quit");
