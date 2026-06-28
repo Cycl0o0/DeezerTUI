@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
+	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
 	"github.com/gen2brain/malgo"
 	"github.com/hajimehoshi/go-mp3"
 )
@@ -540,12 +541,30 @@ func eofToNil(err error) error {
 // decode builds the decoder from the streamBuffer and pumps PCM into the ring,
 // honoring seek requests.
 func (s *source) decode() {
+	// Buffer the whole track before decoding. Decoding while still downloading
+	// made MP3 playback choppy (the decoder outran the network); this matches
+	// what the pre-malgo player did and what FLAC already did implicitly. The
+	// download runs in parallel and is far faster than realtime, so the startup
+	// wait is small; gapless preload still downloads the next track in advance.
+	s.sb.waitDone()
+	if s.dead.Load() {
+		return
+	}
 	var dec pcmStream
 	var err error
 	if strings.Contains(strings.ToUpper(s.format), "FLAC") {
 		dec, err = newFLACStream(s.sb)
 	} else {
-		dec, err = mp3.NewDecoder(s.sb)
+		var md *mp3.Decoder
+		md, err = mp3.NewDecoder(s.sb)
+		if err == nil {
+			// Diagnostics: the device runs at 44100 stereo and the pipeline
+			// assumes the decoder matches. A mismatch here (rate != 44100, or a
+			// mono source) would make MP3 playback sound choppy/wrong while FLAC
+			// (always 44100, mono duplicated to stereo) stays fine.
+			odlog.Info("mp3 decode: sampleRate=%d deviceRate=%d format=%s", md.SampleRate(), sampleRate, s.format)
+			dec = md
+		}
 	}
 	if err != nil {
 		if s.lastErr() == "" {
