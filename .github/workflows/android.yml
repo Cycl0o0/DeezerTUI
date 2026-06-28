@@ -42,6 +42,8 @@ jobs:
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
           export PATH="$PATH:$(go env GOPATH)/bin"
+          # Recent gomobile requires golang.org/x/mobile as a module dependency.
+          go get golang.org/x/mobile/bind@latest
           gomobile init
           mkdir -p gui/android/app/libs
           gomobile bind -target=android -androidapi 24 \
