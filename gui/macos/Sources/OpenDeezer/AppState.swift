@@ -82,6 +82,12 @@ final class AppState: ObservableObject {
     @Published var audioDevices: [AudioDevice] = []
     @Published var currentAudioDeviceID = ""
 
+    // OpenDeezer Connect (device picker): discovered devices + connected target.
+    @Published var showDevicePicker = false
+    @Published var devices: [Device] = []
+    @Published var devicesLoading = false
+    @Published var connectedDeviceAddr = ""   // "" => playing on this computer
+
     // Lyrics sheet (current track's lyrics; synced highlight driven by `tick`).
     @Published var showLyrics = false
     @Published var currentLyrics: Lyrics?     // lyrics for `lyricsTrackID`; nil => none/loading
@@ -200,6 +206,7 @@ final class AppState: ObservableObject {
         Core.setGapless(settings.gapless)
         Core.setCrossfadeMS(settings.crossfadeMS)
         currentAudioDeviceID = Core.currentAudioDevice
+        connectedDeviceAddr = Core.connectedDevice
         nowPlaying.registerCommands(app: self)
         tray.closeToTray = settings.closeToTray
         tray.attach(app: self)
@@ -590,6 +597,46 @@ final class AppState: ObservableObject {
     func setAudioDevice(_ id: String) {
         currentAudioDeviceID = id
         Task.detached { Core.setAudioDevice(id) }
+    }
+
+    // MARK: OpenDeezer Connect (device picker)
+
+    var isConnectedRemote: Bool { !connectedDeviceAddr.isEmpty }
+    var connectedDeviceName: String {
+        devices.first(where: { $0.addr == connectedDeviceAddr })?.name ?? connectedDeviceAddr
+    }
+
+    // Run a LAN discovery probe and refresh the connected-device state.
+    func discoverDevices() {
+        devices = []
+        devicesLoading = true
+        Task.detached {
+            let ds = Core.discoverDevices()
+            let cur = Core.connectedDevice
+            await MainActor.run {
+                self.devices = ds
+                self.connectedDeviceAddr = cur
+                self.devicesLoading = false
+            }
+        }
+    }
+    // Route playback to a device; the existing transport then drives it remotely.
+    func connectDevice(_ d: Device) {
+        let addr = d.addr
+        Task.detached {
+            let ok = Core.connectDevice(addr)
+            let cur = Core.connectedDevice
+            await MainActor.run {
+                if ok { self.connectedDeviceAddr = cur }
+                self.showDevicePicker = false
+            }
+        }
+    }
+    // Return playback to this computer.
+    func disconnectDevice() {
+        connectedDeviceAddr = ""
+        showDevicePicker = false
+        Task.detached { Core.disconnectDevice() }
     }
 
     // MARK: gapless / crossfade (persisted + applied to the engine)

@@ -190,4 +190,22 @@ enum Core {
     static func preload(_ trackID: String, durationMs: Int64) {
         withC(trackID) { DZPreload($0, Int64(durationMs)) }
     }
+
+    // MARK: OpenDeezer Connect (device picker)
+
+    /// Discovers OpenDeezer devices on the LAN (~700ms). Returns [] on none/error.
+    /// The engine returns a bare JSON array; decode it directly.
+    static func discoverDevices(timeoutMS: Int32 = 700) -> [Device] {
+        decode([Device].self, takeJSON(DZDiscoverDevices(timeoutMS))) ?? []
+    }
+    /// Routes playback to the device at host:port; true on success. Once connected
+    /// the existing transport calls transparently drive the chosen device.
+    @discardableResult
+    static func connectDevice(_ addr: String) -> Bool {
+        withC(addr) { DZConnectDevice($0) } == 1
+    }
+    /// Returns playback to this computer.
+    static func disconnectDevice() { DZDisconnectDevice() }
+    /// Connected device's host:port ("" when playing on this computer).
+    static var connectedDevice: String { takeString(DZConnectedDevice()) }
 }

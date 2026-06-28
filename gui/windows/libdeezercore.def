@@ -57,3 +57,8 @@ EXPORTS
   DZSetCrossfadeMS
   DZCrossfadeMS
   DZPreload
+  DZSetClientInfo
+  DZDiscoverDevices
+  DZConnectDevice
+  DZDisconnectDevice
+  DZConnectedDevice

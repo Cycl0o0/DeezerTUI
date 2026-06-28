@@ -74,6 +74,11 @@ struct LyricsData {
     QString             plain;
     QVector<LyricsLine> lines;   // populated only when isSynced
 };
+// One OpenDeezer Connect device from DZDiscoverDevices ({name,addr,client,version}).
+// addr is the control-API host:port; client maps to a friendly device type.
+struct ConnectDevice {
+    QString name, addr, client, version;
+};
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -168,6 +173,14 @@ private:
     void preloadNext();
     bool autoTransitionEnabled() const { return m_gapless || m_crossfadeMs > 0; }
 
+    // ---- OpenDeezer Connect (LAN device picker) ----
+    void openConnectPicker();                                   // discover, then show
+    void showConnectPicker(const QVector<ConnectDevice> &devices,
+                           const QString &connectedAddr);
+    void connectDevice(const QString &addr, const QString &name);
+    void disconnectDevice();                                    // back to this computer
+    void refreshConnectButton();                               // paint from DZConnectedDevice
+
     // ---- OS integration: MPRIS media controls, tray, settings ----
     void setupMpris();
     void setupTray();
@@ -222,6 +235,7 @@ private:
 
     QToolButton *m_prevBtn = nullptr, *m_playBtn = nullptr, *m_nextBtn = nullptr;
     QToolButton *m_likeBtn = nullptr;
+    QToolButton *m_connectBtn = nullptr;        // OpenDeezer Connect device picker
     QToolButton *m_shuffleBtn = nullptr, *m_repeatBtn = nullptr;
     QSlider     *m_seek = nullptr, *m_vol = nullptr;
     QLabel      *m_nowPlaying = nullptr, *m_cover = nullptr,
@@ -287,6 +301,7 @@ private:
     MprisController *m_mpris       = nullptr;   // session-bus media controls
     QSystemTrayIcon *m_tray        = nullptr;   // background / close-to-tray
     QString          m_lastStatus;              // dedupe MPRIS PlaybackStatus
+    QString          m_connectName;             // friendly name of the connected device
     int              m_quality     = 0;         // 0 Normal, 1 High, 2 HiFi
     bool             m_replayGain  = false;     // loudness normalization (DZReplayGain)
     bool             m_closeToTray = true;      // honour close-to-tray setting

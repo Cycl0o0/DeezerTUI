@@ -71,6 +71,7 @@
 #include <map>
 #include <chrono>
 #include <cmath>
+#include <cwctype>
 #include <fstream>
 #include <iterator>
 #include <coroutine>
@@ -132,6 +133,12 @@ extern "C" {
     void           DZSetCrossfadeMS(int ms);                 // 0 = off
     int            DZCrossfadeMS(void);                      // current ms
     void           DZPreload(char* trackID, long long durationMS); // warm next for gapless/crossfade
+    // ---- OpenDeezer Connect (LAN device transfer) ---------------------------
+    void           DZSetClientInfo(char* client, char* device); // OPTIONAL: call BEFORE DZInit
+    char*          DZDiscoverDevices(int timeoutMS);            // JSON [{name,addr,client,version}]; free with DZFree
+    int            DZConnectDevice(char* addr);                 // 1 ok / 0 fail; addr is host:port
+    void           DZDisconnectDevice();                        // return playback to this computer
+    char*          DZConnectedDevice(void);                     // connected host:port ("" = local); free with DZFree
 }
 
 // ---- namespace aliases ------------------------------------------------------
@@ -410,6 +417,43 @@ static std::vector<AudioDevice> ParseDevices(hstring const& json) {
         out.push_back(std::move(d));
     }
     return out;
+}
+
+// DZDiscoverDevices -> bare JSON array [{name,addr,client,version}] (or an
+// {"error":...} object, which is not an array -> parses to empty).
+struct ConnectDevice { hstring name, addr, client, version; };
+static std::vector<ConnectDevice> ParseConnectDevices(hstring const& json) {
+    std::vector<ConnectDevice> out;
+    wdj::JsonArray arr{ nullptr };
+    if (!wdj::JsonArray::TryParse(json, arr)) return out;
+    for (auto const& v : arr) {
+        auto o = v.GetObject();
+        ConnectDevice d;
+        d.name    = o.GetNamedString(L"name", L"");
+        d.addr    = o.GetNamedString(L"addr", L"");
+        d.client  = o.GetNamedString(L"client", L"");
+        d.version = o.GetNamedString(L"version", L"");
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
+// Map a discovery client/platform id to a friendly device type for the picker.
+static hstring ConnectTypeLabel(hstring const& client) {
+    std::wstring c{ client.c_str() };
+    for (auto& ch : c) ch = static_cast<wchar_t>(towlower(ch));
+    if (c == L"tui")                                 return L"Terminal";
+    if (c == L"darwin" || c == L"macos")             return L"macOS";
+    if (c == L"windows")                             return L"Windows";
+    if (c == L"linux" || c == L"gnome" || c == L"kde") return L"Linux";
+    return client.empty() ? hstring(L"Device") : client;
+}
+
+// This PC's name, used as the device label advertised over discovery.
+static hstring ThisDeviceName() {
+    wchar_t buf[256]; DWORD n = 256;
+    if (GetComputerNameW(buf, &n) && n > 0) return hstring(buf, n);
+    return L"OpenDeezer for Windows";
 }
 
 static void Trim(std::wstring& s) {
@@ -868,6 +912,26 @@ private:
         muxc::Grid::SetColumn(modes, 6); bar.Children().Append(modes);
 
         muxc::StackPanel vol; vol.Orientation(muxc::Orientation::Horizontal); vol.Spacing(6); vol.VerticalAlignment(mux::VerticalAlignment::Center);
+        // OpenDeezer Connect: a discreet cast button whose flyout lists LAN devices
+        // (Spotify-Connect style). Selecting one routes the EXISTING transport to it.
+        m_connectBtn = muxc::Button();
+        { muxc::FontIcon fi; fi.Glyph(L"\uEC15"); m_connectBtn.Content(fi); } // Segoe MDL2 "Cast"
+        m_connectBtn.Padding({ 6, 2, 6, 2 });
+        winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(m_connectBtn, box_value(L"Connect to a device"));
+        m_connectFlyout = muxc::Flyout();
+        muxc::StackPanel cp; cp.Spacing(8); cp.MinWidth(280); cp.Padding({ 4, 4, 4, 4 });
+        muxc::TextBlock ch; ch.Text(L"Connect to a device"); ch.FontWeight(wut::FontWeights::SemiBold());
+        m_connectStatus = muxc::TextBlock(); m_connectStatus.Opacity(0.7); m_connectStatus.TextWrapping(mux::TextWrapping::Wrap);
+        m_connectList = muxc::ListView();
+        m_connectList.SelectionMode(muxc::ListViewSelectionMode::None);
+        m_connectList.IsItemClickEnabled(true);
+        m_connectList.MaxHeight(320);
+        m_connectList.ItemClick({ get_weak(), &MainWindow::OnConnectItemClick });
+        cp.Children().Append(ch); cp.Children().Append(m_connectStatus); cp.Children().Append(m_connectList);
+        m_connectFlyout.Content(cp);
+        m_connectFlyout.Opened({ get_weak(), &MainWindow::OnConnectOpened });
+        m_connectBtn.Flyout(m_connectFlyout);
+        vol.Children().Append(m_connectBtn);
         { muxc::FontIcon sp; sp.Glyph(L""); sp.VerticalAlignment(mux::VerticalAlignment::Center); vol.Children().Append(sp); }
         m_volume = muxc::Slider(); m_volume.Minimum(0); m_volume.Maximum(100); m_volume.Value(100); m_volume.Width(120);
         m_volume.VerticalAlignment(mux::VerticalAlignment::Center); m_volume.Foreground(m_accent);
@@ -950,6 +1014,28 @@ private:
         sp.Children().Append(img); sp.Children().Append(t1); sp.Children().Append(t2);
         if (!art.empty()) LoadArt(img, art, m_artGen, false);
         return sp;
+    }
+
+    // One Connect picker row: device name + "type · version" subtitle, with a
+    // trailing accent checkmark when it is the active device. Tag carries the
+    // m_connectDevices index, or -1 for the "This computer" (disconnect) row.
+    mux::UIElement MakeConnectRow(hstring name, hstring subtitle, bool active, int index) {
+        muxc::Grid g; g.Tag(box_value(index)); g.Padding({ 6, 6, 6, 6 }); g.ColumnSpacing(10); g.MinWidth(260);
+        g.ColumnDefinitions().Append(ColStar());
+        g.ColumnDefinitions().Append(ColAuto());
+        muxc::StackPanel sp; sp.VerticalAlignment(mux::VerticalAlignment::Center);
+        muxc::TextBlock t1; t1.Text(name); t1.FontWeight(wut::FontWeights::SemiBold());
+        t1.TextWrapping(mux::TextWrapping::NoWrap); t1.TextTrimming(mux::TextTrimming::CharacterEllipsis);
+        muxc::TextBlock t2; t2.Text(subtitle); t2.Opacity(0.6); t2.FontSize(12);
+        t2.TextWrapping(mux::TextWrapping::NoWrap); t2.TextTrimming(mux::TextTrimming::CharacterEllipsis);
+        sp.Children().Append(t1); sp.Children().Append(t2);
+        muxc::Grid::SetColumn(sp, 0); g.Children().Append(sp);
+        if (active) {
+            muxc::FontIcon chk; chk.Glyph(L"\uE73E"); chk.Foreground(m_accent); // Segoe MDL2 CheckMark
+            chk.VerticalAlignment(mux::VerticalAlignment::Center);
+            muxc::Grid::SetColumn(chk, 1); g.Children().Append(chk);
+        }
+        return g;
     }
 
     void FillTrackList(muxc::ListView const& lv, std::vector<Track> const& tracks) {
@@ -1045,6 +1131,10 @@ private:
         auto strong = get_strong();
         m_nowTitle.Text(L"Logging in…");
         co_await winrt::resume_background();
+        // Identify this instance to OpenDeezer Connect (LAN discovery / whoami)
+        // BEFORE DZInit, so other devices show a friendly name + Windows type.
+        std::string client = "windows", device = to_string(ThisDeviceName());
+        DZSetClientInfo(client.data(), device.data());
         std::string s = to_string(arl);
         int ok = DZInit(s.data());
         co_await resume_foreground(m_win.DispatcherQueue());
@@ -1676,6 +1766,88 @@ private:
     void OnSearchClick(wf::IInspectable const&, mux::RoutedEventArgs const&) { RunSearch(); }
     void OnSearchKey(wf::IInspectable const&, muxin::KeyRoutedEventArgs const& e) {
         if (e.Key() == wsys::VirtualKey::Enter) RunSearch();
+    }
+
+    // ---- OpenDeezer Connect (LAN device picker) -----------------------------
+    // The cast button's flyout opens -> discover devices off-thread and rebuild
+    // the list. A "This computer" row (disconnect) is always first; each device
+    // row shows name / type / version and a checkmark for the active one. Once a
+    // device is connected the EXISTING transport calls route to it transparently.
+    fire_and_forget OnConnectOpened(wf::IInspectable const&, wf::IInspectable const&) {
+        auto strong = get_strong();
+        int gen = ++m_connectGen;                  // drops a previous (slower) open
+        m_connectList.Items().Clear();
+        m_connectStatus.Visibility(mux::Visibility::Visible);
+        if (!m_loggedIn) { m_connectStatus.Text(L"Sign in to use Connect."); co_return; }
+        m_connectStatus.Text(L"Searching for devices…");
+        co_await winrt::resume_background();
+        auto devs = ParseConnectDevices(TakeJson(DZDiscoverDevices(700)));
+        hstring connAddr;
+        if (char* c = DZConnectedDevice()) { connAddr = to_hstring(std::string(c)); DZFree(c); }
+        co_await resume_foreground(m_win.DispatcherQueue());
+        if (gen != m_connectGen) co_return;        // a newer open superseded this one
+        m_connectDevices = std::move(devs);
+        hstring connName;
+        for (auto const& d : m_connectDevices) if (d.addr == connAddr) connName = d.name;
+        UpdateConnectIndicator(connAddr, connName);
+
+        m_connectList.Items().Clear();
+        // "This computer" (local) -> disconnect. Active when no device is connected.
+        m_connectList.Items().Append(MakeConnectRow(L"This computer", L"Local playback", connAddr.empty(), -1));
+        int i = 0;
+        for (auto const& d : m_connectDevices) {
+            hstring sub = ConnectTypeLabel(d.client);
+            if (!d.version.empty()) sub = sub + L" · OpenDeezer " + d.version;
+            m_connectList.Items().Append(MakeConnectRow(d.name.empty() ? d.addr : d.name, sub, d.addr == connAddr, i));
+            ++i;
+        }
+        if (m_connectDevices.empty()) { m_connectStatus.Text(L"No other devices found on your network."); }
+        else { m_connectStatus.Visibility(mux::Visibility::Collapsed); }
+    }
+
+    void OnConnectItemClick(wf::IInspectable const&, muxc::ItemClickEventArgs const& e) {
+        int i = TagIndex(e.ClickedItem());
+        if (m_connectFlyout) m_connectFlyout.Hide();
+        if (i < 0) { DispatchDisconnect(); return; }   // -1 = "This computer"
+        if (i < static_cast<int>(m_connectDevices.size())) {
+            auto const& d = m_connectDevices[i];
+            DispatchConnect(d.addr, d.name.empty() ? d.addr : d.name);
+        }
+    }
+
+    fire_and_forget DispatchConnect(hstring addr, hstring name) {
+        auto strong = get_strong();
+        if (addr.empty()) co_return;
+        co_await winrt::resume_background();
+        std::string a = to_string(addr);
+        int ok = DZConnectDevice(a.data());
+        hstring connAddr;
+        if (char* c = DZConnectedDevice()) { connAddr = to_hstring(std::string(c)); DZFree(c); }
+        co_await resume_foreground(m_win.DispatcherQueue());
+        if (!ok) { ShowMessage(L"Couldn't connect", L"That device could not be reached."); }
+        UpdateConnectIndicator(connAddr, ok ? name : hstring(L""));
+    }
+
+    fire_and_forget DispatchDisconnect() {
+        auto strong = get_strong();
+        co_await winrt::resume_background();
+        DZDisconnectDevice();   // playback returns to this computer
+        co_await resume_foreground(m_win.DispatcherQueue());
+        UpdateConnectIndicator(L"", L"");
+    }
+
+    // Reflect the connected device: tint the cast button + update its tooltip.
+    void UpdateConnectIndicator(hstring addr, hstring name) {
+        m_connectedAddr = addr;
+        if (!m_connectBtn) return;
+        if (!addr.empty()) {
+            m_connectBtn.Foreground(m_accent);
+            hstring who = name.empty() ? addr : name;
+            winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(m_connectBtn, box_value(L"Playing on " + who));
+        } else {
+            m_connectBtn.ClearValue(muxc::Control::ForegroundProperty());
+            winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(m_connectBtn, box_value(L"Connect to a device"));
+        }
     }
 
     // ---- library mutations: like / add-to-playlist / playlist CRUD ----------
@@ -2398,7 +2570,7 @@ private:
         dlg.XamlRoot(m_win.Content().XamlRoot());
         dlg.Title(box_value(L"About OpenDeezer"));
         muxc::StackPanel sp; sp.Spacing(8);
-        muxc::TextBlock h; h.Text(L"OpenDeezer 0.6.0"); h.FontSize(22); h.FontWeight(wut::FontWeights::SemiBold());
+        muxc::TextBlock h; h.Text(L"OpenDeezer 1.0.0"); h.FontSize(22); h.FontWeight(wut::FontWeights::SemiBold());
         h.Foreground(m_accent);
         muxc::TextBlock tag; tag.Text(L"An open source reimplementation of Deezer."); tag.TextWrapping(mux::TextWrapping::Wrap);
         muxc::TextBlock body; body.TextWrapping(mux::TextWrapping::Wrap);
@@ -2461,6 +2633,15 @@ private:
     muxp::ToggleButton m_shuffleBtn{ nullptr }, m_likeBtn{ nullptr };
     muxc::HyperlinkButton m_lyricsBtn{ nullptr }, m_artistBtn{ nullptr }; // -> lyrics / artist views
     bool m_suppressLike = false; // guard programmatic heart resets from OnLike
+
+    // ---- OpenDeezer Connect (LAN device picker) -----------------------------
+    muxc::Button    m_connectBtn{ nullptr };
+    muxc::Flyout    m_connectFlyout{ nullptr };
+    muxc::TextBlock m_connectStatus{ nullptr };   // "Searching…" / "No devices…"
+    muxc::ListView  m_connectList{ nullptr };
+    std::vector<ConnectDevice> m_connectDevices;  // parallel to the device rows (Tag = index)
+    hstring m_connectedAddr;                       // active device host:port ("" = local)
+    int     m_connectGen = 0;                       // drops a superseded flyout open
 
     // ---- lyrics view --------------------------------------------------------
     mux::UIElement      m_lyricsPage{ nullptr };
