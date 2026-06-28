@@ -143,7 +143,12 @@ func Discover(timeout time.Duration, selfPort int) ([]Device, error) {
 	if len(ifaces) == 0 {
 		_, _ = conn.WriteToUDP(probe, group)
 	}
-	// Fallback: limited broadcast (helps where multicast is filtered).
+	// Fallbacks for networks that filter multicast: per-interface directed
+	// broadcast (e.g. 192.168.1.255 — crosses WiFi/Ethernet within a subnet far
+	// more reliably than limited broadcast) plus limited broadcast.
+	for _, bc := range broadcastAddrs() {
+		_, _ = conn.WriteToUDP(probe, &net.UDPAddr{IP: bc, Port: Port})
+	}
 	_, _ = conn.WriteToUDP(probe, &net.UDPAddr{IP: net.IPv4bcast, Port: Port})
 
 	_ = conn.SetReadDeadline(time.Now().Add(timeout))
@@ -177,6 +182,36 @@ func Discover(timeout time.Duration, selfPort int) ([]Device, error) {
 		out = append(out, Device{Name: name, Addr: addr, Client: rep.Client, Version: rep.Version})
 	}
 	return out, nil
+}
+
+// broadcastAddrs returns the IPv4 directed-broadcast address of each non-loopback
+// interface (host bits set), e.g. 192.168.1.255 for 192.168.1.7/24.
+func broadcastAddrs() []net.IP {
+	var out []net.IP
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return out
+	}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip4 := ipnet.IP.To4()
+		if ip4 == nil || ip4.IsLoopback() {
+			continue
+		}
+		mask := ipnet.Mask
+		if len(mask) != 4 {
+			continue
+		}
+		bc := make(net.IP, 4)
+		for i := 0; i < 4; i++ {
+			bc[i] = ip4[i] | ^mask[i]
+		}
+		out = append(out, bc)
+	}
+	return out
 }
 
 // localIPs is the set of this machine's interface IPs (for self-filtering).
