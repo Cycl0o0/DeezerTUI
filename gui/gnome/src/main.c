@@ -198,6 +198,12 @@ typedef struct {
   guint                 login_poll_id;   /* g_timeout polling cookies, 0 if none */
   gboolean              login_busy;      /* a DZInit is in flight (debounce) */
   gboolean              login_captured;  /* arl already captured -> stop polling */
+
+  /* ---- OpenDeezer Connect (LAN device picker; Spotify-Connect style) ---- */
+  GtkMenuButton        *connect_btn;     /* speaker button on the now-playing bar */
+  GtkWidget            *connect_box;     /* popover content, rebuilt on each open */
+  guint                 connect_gen;     /* drops stale async discovery results */
+  char                 *connect_name;    /* connected device name ("" if local) */
 } App;
 
 static App *APP; /* single window — a global keeps GTask plumbing tidy */
@@ -3659,6 +3665,7 @@ static void load_css(void) {
       ".np-cover{border-radius:6px;}\n"
       ".dz-avatar{border-radius:9999px;}\n"
       ".dz-liked{color:" ACCENT ";}\n"
+      ".dz-connected{color:" ACCENT ";}\n"
       ".lyrics-line{padding:5px 14px;opacity:0.45;}\n"
       ".lyrics-line.lyrics-active{opacity:1;font-weight:700;color:" ACCENT ";}\n"
       ".lyrics-plain{padding:8px 14px;}\n"
@@ -3690,6 +3697,255 @@ static GtkButton *transport_button(const char *icon) {
   gtk_widget_add_css_class(b, "circular");
   gtk_widget_add_css_class(b, "flat");
   return GTK_BUTTON(b);
+}
+
+/* ---------------------------------------------------------------------------
+ * OpenDeezer Connect — a Spotify-Connect-style device picker.
+ *
+ * A discreet speaker button on the now-playing bar opens a popover that
+ * discovers OpenDeezer instances on the LAN (DZDiscoverDevices, blocking → run
+ * on a GTask worker exactly like the browse/cover paths) and lists each with its
+ * NAME, device TYPE (from the client id) and OpenDeezer VERSION, plus a "This
+ * computer" entry that returns playback here (DZDisconnectDevice). Selecting a
+ * device routes playback to it (DZConnectDevice, also blocking → worker); the
+ * existing transport calls then drive it transparently, so only the picker is
+ * new. Every char* the engine hands back is released with DZFree.
+ * ------------------------------------------------------------------------- */
+
+/* Map a discovery client id to a human device type (per the project's table). */
+static const char *connect_type_label(const char *client) {
+  if (!client || !*client)                                      return "Device";
+  if (!g_strcmp0(client, "tui"))                                return "Terminal";
+  if (!g_strcmp0(client, "darwin") || !g_strcmp0(client, "macos")) return "macOS";
+  if (!g_strcmp0(client, "windows"))                            return "Windows";
+  if (!g_strcmp0(client, "linux") || !g_strcmp0(client, "gnome") ||
+      !g_strcmp0(client, "kde"))                                return "Linux";
+  return client;
+}
+
+static const char *connect_type_icon(const char *client) {
+  if (!g_strcmp0(client, "tui")) return "utilities-terminal-symbolic";
+  return "computer-symbolic";
+}
+
+/* One picker entry: a flat button [icon · name/sub · check-if-connected]. */
+static GtkWidget *connect_row(const char *name, const char *sub, const char *icon,
+                              gboolean connected) {
+  GtkWidget *btn = gtk_button_new();
+  gtk_widget_add_css_class(btn, "flat");
+  gtk_button_set_has_frame(GTK_BUTTON(btn), FALSE);
+  GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  if (icon) gtk_box_append(GTK_BOX(row), gtk_image_new_from_icon_name(icon));
+  GtkWidget *texts = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_hexpand(texts, TRUE);
+  GtkWidget *nl = gtk_label_new(name);
+  gtk_label_set_xalign(GTK_LABEL(nl), 0.0);
+  gtk_label_set_ellipsize(GTK_LABEL(nl), PANGO_ELLIPSIZE_END);
+  gtk_widget_add_css_class(nl, "heading");
+  gtk_box_append(GTK_BOX(texts), nl);
+  if (sub && *sub) {
+    GtkWidget *sl = gtk_label_new(sub);
+    gtk_label_set_xalign(GTK_LABEL(sl), 0.0);
+    gtk_label_set_ellipsize(GTK_LABEL(sl), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(sl, "dim-label");
+    gtk_box_append(GTK_BOX(texts), sl);
+  }
+  gtk_box_append(GTK_BOX(row), texts);
+  if (connected) {
+    GtkWidget *chk = gtk_image_new_from_icon_name("object-select-symbolic");
+    gtk_widget_add_css_class(chk, "dz-connected");
+    gtk_box_append(GTK_BOX(row), chk);
+  }
+  gtk_button_set_child(GTK_BUTTON(btn), row);
+  return btn;
+}
+
+/* Mirror the connected device (DZConnectedDevice) onto the picker button. */
+static void connect_reflect(App *a) {
+  if (!a->connect_btn) return;
+  char *addr = DZConnectedDevice(); /* malloc'd; "" = local */
+  gboolean connected = addr && *addr;
+  GtkWidget *w = GTK_WIDGET(a->connect_btn);
+  if (connected) {
+    gtk_widget_add_css_class(w, "dz-connected");
+    char *tip = g_strdup_printf("Playing on %s",
+        (a->connect_name && *a->connect_name) ? a->connect_name : addr);
+    gtk_widget_set_tooltip_text(w, tip);
+    g_free(tip);
+  } else {
+    gtk_widget_remove_css_class(w, "dz-connected");
+    gtk_widget_set_tooltip_text(w, "Connect to a device");
+  }
+  if (addr) DZFree(addr);
+}
+
+/* DZConnectDevice does a network handshake, so it blocks — run on a worker. */
+typedef struct { char *addr; char *name; } ConnCtx;
+static void conn_ctx_free(gpointer p) { ConnCtx *c = p; g_free(c->addr); g_free(c->name); g_free(c); }
+static void conn_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
+  (void)src; (void)c;
+  ConnCtx *x = data;
+  g_task_return_boolean(task, DZConnectDevice(x->addr) == 1);
+}
+static void conn_done(GObject *src, GAsyncResult *res, gpointer data) {
+  (void)src; (void)data;
+  ConnCtx *x = g_task_get_task_data(G_TASK(res));
+  gboolean ok = g_task_propagate_boolean(G_TASK(res), NULL);
+  if (ok) {
+    g_free(APP->connect_name);
+    APP->connect_name = g_strdup(x->name ? x->name : "");
+    toastf(APP, "Playing on %s", (x->name && *x->name) ? x->name : "device");
+  } else {
+    toast(APP, "Couldn't connect to that device");
+  }
+  connect_reflect(APP);
+}
+static void connect_to_device(App *a, const char *addr, const char *name) {
+  (void)a;
+  ConnCtx *x = g_new0(ConnCtx, 1);
+  x->addr = g_strdup(addr ? addr : "");
+  x->name = g_strdup(name ? name : "");
+  GTask *t = g_task_new(NULL, NULL, conn_done, NULL);
+  g_task_set_task_data(t, x, conn_ctx_free);
+  g_task_run_in_thread(t, conn_worker);
+  g_object_unref(t);
+}
+
+/* row handlers: the device addr/name ride on the button as object data */
+static void on_connect_device_clicked(GtkButton *b, gpointer data) {
+  App *a = data;
+  const char *addr = g_object_get_data(G_OBJECT(b), "dz_addr");
+  const char *name = g_object_get_data(G_OBJECT(b), "dz_name");
+  if (a->connect_btn) gtk_menu_button_popdown(a->connect_btn);
+  if (addr && *addr) connect_to_device(a, addr, name);
+}
+static void on_connect_local_clicked(GtkButton *b, gpointer data) {
+  (void)b;
+  App *a = data;
+  if (a->connect_btn) gtk_menu_button_popdown(a->connect_btn);
+  DZDisconnectDevice();
+  g_free(a->connect_name);
+  a->connect_name = g_strdup("");
+  connect_reflect(a);
+  toast(a, "Playing on this computer");
+}
+
+/* discovery: DZDiscoverDevices blocks (~700ms), so run it on a worker */
+static void disc_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
+  (void)src; (void)data; (void)c;
+  char *j = DZDiscoverDevices(700);
+  char *dup = g_strdup(j ? j : "[]");
+  if (j) DZFree(j);
+  g_task_return_pointer(task, dup, g_free);
+}
+static void disc_done(GObject *src, GAsyncResult *res, gpointer data) {
+  (void)src; (void)data;
+  App *a = APP;
+  guint gen = GPOINTER_TO_UINT(g_task_get_task_data(G_TASK(res)));
+  char *json = g_task_propagate_pointer(G_TASK(res), NULL);
+  /* drop stale results (popover reopened/closed since this probe started) */
+  if (gen != a->connect_gen || !a->connect_box) { g_free(json); return; }
+
+  box_clear(a->connect_box);
+  char *cur = DZConnectedDevice(); /* malloc'd; "" = local */
+
+  GtkWidget *home = connect_row("This computer", "Play here", "computer-symbolic",
+                                !(cur && *cur));
+  g_signal_connect(home, "clicked", G_CALLBACK(on_connect_local_clicked), a);
+  gtk_box_append(GTK_BOX(a->connect_box), home);
+
+  guint n = 0;
+  if (json) {
+    JsonParser *p = json_parser_new();
+    if (json_parser_load_from_data(p, json, -1, NULL)) {
+      JsonNode *root = json_parser_get_root(p);
+      if (root && JSON_NODE_HOLDS_ARRAY(root)) {
+        JsonArray *arr = json_node_get_array(root);
+        n = json_array_get_length(arr);
+        for (guint i = 0; i < n; i++) {
+          JsonObject *d = json_array_get_object_element(arr, i);
+          char *name = jstr(d, "name"), *addr = jstr(d, "addr"),
+               *client = jstr(d, "client"), *ver = jstr(d, "version");
+          char *sub = (ver && *ver)
+                        ? g_strdup_printf("%s · OpenDeezer %s", connect_type_label(client), ver)
+                        : g_strdup(connect_type_label(client));
+          gboolean connected = cur && *cur && g_strcmp0(cur, addr) == 0;
+          GtkWidget *r = connect_row(*name ? name : addr, sub,
+                                     connect_type_icon(client), connected);
+          g_object_set_data_full(G_OBJECT(r), "dz_addr", g_strdup(addr), g_free);
+          g_object_set_data_full(G_OBJECT(r), "dz_name", g_strdup(*name ? name : addr), g_free);
+          g_signal_connect(r, "clicked", G_CALLBACK(on_connect_device_clicked), a);
+          gtk_box_append(GTK_BOX(a->connect_box), r);
+          g_free(name); g_free(addr); g_free(client); g_free(ver); g_free(sub);
+        }
+      }
+    }
+    g_object_unref(p);
+  }
+  if (n == 0) {
+    GtkWidget *none = gtk_label_new("No devices found");
+    gtk_widget_add_css_class(none, "dim-label");
+    gtk_widget_set_margin_top(none, 8);
+    gtk_widget_set_margin_bottom(none, 8);
+    gtk_box_append(GTK_BOX(a->connect_box), none);
+  }
+  if (cur) DZFree(cur);
+  g_free(json);
+}
+
+/* called by GtkMenuButton just before the popover is shown: refresh the list */
+static void connect_popup_rebuild(GtkMenuButton *mb, gpointer data) {
+  (void)mb;
+  App *a = data;
+  if (!a->connect_box) return;
+  box_clear(a->connect_box);
+  guint gen = ++a->connect_gen; /* invalidate any in-flight discovery */
+
+  char *cur = DZConnectedDevice();
+  GtkWidget *home = connect_row("This computer", "Play here", "computer-symbolic",
+                                !(cur && *cur));
+  g_signal_connect(home, "clicked", G_CALLBACK(on_connect_local_clicked), a);
+  gtk_box_append(GTK_BOX(a->connect_box), home);
+  if (cur) DZFree(cur);
+
+  /* "Searching…" placeholder until disc_done swaps in the results */
+  GtkWidget *busy = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_halign(busy, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_top(busy, 8);
+  gtk_widget_set_margin_bottom(busy, 8);
+  GtkWidget *spin = gtk_spinner_new();
+  gtk_spinner_start(GTK_SPINNER(spin));
+  gtk_box_append(GTK_BOX(busy), spin);
+  GtkWidget *lbl = gtk_label_new("Searching for devices…");
+  gtk_widget_add_css_class(lbl, "dim-label");
+  gtk_box_append(GTK_BOX(busy), lbl);
+  gtk_box_append(GTK_BOX(a->connect_box), busy);
+
+  GTask *t = g_task_new(NULL, NULL, disc_done, NULL);
+  g_task_set_task_data(t, GUINT_TO_POINTER(gen), NULL);
+  g_task_run_in_thread(t, disc_worker);
+  g_object_unref(t);
+}
+
+/* the speaker/cast button itself, packed into the now-playing bar */
+static GtkWidget *build_connect_button(App *a) {
+  GtkMenuButton *mb = GTK_MENU_BUTTON(gtk_menu_button_new());
+  gtk_menu_button_set_icon_name(mb, "audio-speakers-symbolic");
+  gtk_widget_add_css_class(GTK_WIDGET(mb), "flat");
+  gtk_widget_set_valign(GTK_WIDGET(mb), GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text(GTK_WIDGET(mb), "Connect to a device");
+
+  GtkWidget *pop = gtk_popover_new();
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_size_request(box, 240, -1);
+  gtk_popover_set_child(GTK_POPOVER(pop), box);
+  gtk_menu_button_set_popover(mb, pop);
+  /* refresh the device list every time the popover is opened */
+  gtk_menu_button_set_create_popup_func(mb, connect_popup_rebuild, a, NULL);
+
+  a->connect_btn = mb;
+  a->connect_box = box;
+  return GTK_WIDGET(mb);
 }
 
 static GtkWidget *build_now_playing(App *a) {
@@ -3782,6 +4038,9 @@ static GtkWidget *build_now_playing(App *a) {
   gtk_widget_add_controller(GTK_WIDGET(a->seek), GTK_EVENT_CONTROLLER(click));
   gtk_box_append(GTK_BOX(bar), GTK_WIDGET(a->seek));
   gtk_box_append(GTK_BOX(bar), GTK_WIDGET(a->dur_label));
+
+  /* OpenDeezer Connect device picker (Spotify-Connect style) */
+  gtk_box_append(GTK_BOX(bar), build_connect_button(a));
 
   /* volume */
   gtk_box_append(GTK_BOX(bar), gtk_image_new_from_icon_name("audio-volume-high-symbolic"));
@@ -3883,6 +4142,10 @@ static void on_activate(GApplication *app, gpointer data) {
 
   /* load persisted settings; quality is applied after login (init_done) */
   settings_load(a);
+
+  /* Identify this instance to OpenDeezer Connect discovery (must precede DZInit):
+   * peers map the "gnome" client id to the Linux device type. */
+  DZSetClientInfo("gnome", "OpenDeezer for GNOME");
 
   /* publish ourselves on the session bus for the OS media controls */
   mpris_setup(a);

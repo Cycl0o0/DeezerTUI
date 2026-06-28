@@ -62,6 +62,7 @@ struct RootView: View {
         .sheet(isPresented: $app.showLyrics) { LyricsView() }
         .sheet(isPresented: $app.showArtist) { ArtistView() }
         .sheet(isPresented: $app.showAddToPlaylist) { AddToPlaylistSheet() }
+        .sheet(isPresented: $app.showDevicePicker) { DevicePickerView() }
     }
 }
 

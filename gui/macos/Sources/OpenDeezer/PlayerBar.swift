@@ -127,13 +127,20 @@ struct PlayerBar: View {
             }
             .disabled(app.current?.artists.first == nil)
             .help("Go to Artist")
+            // OpenDeezer Connect: pick a device to play on (Spotify-Connect style).
+            iconButton("rectangle.connected.to.line.below",
+                       tint: app.isConnectedRemote ? DZ.accent : DZ.textSec) {
+                app.showDevicePicker = true
+                app.discoverDevices()
+            }
+            .help(app.isConnectedRemote ? "Connected — choose a device" : "Connect to a device")
             HStack(spacing: 6) {
                 Image(systemName: "speaker.fill").font(.system(size: 11)).foregroundStyle(DZ.textSec)
                 Slider(value: Binding(get: { app.volume }, set: { app.setVolume($0) }), in: 0...1)
                     .frame(width: 84).tint(DZ.accent)
             }
         }
-        .frame(width: 248, alignment: .trailing)
+        .frame(width: 282, alignment: .trailing)
     }
 
     private func iconButton(_ symbol: String, size: CGFloat = 15,

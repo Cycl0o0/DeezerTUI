@@ -87,6 +87,40 @@ struct AudioDevice: Codable, Hashable, Identifiable {
 }
 struct AudioDevicesResponse: Codable { let devices: [AudioDevice] }
 
+// OpenDeezer Connect device (DZDiscoverDevices). `addr` is the control host:port
+// used to connect; `id` aliases it so the picker list is Identifiable. The
+// engine emits a bare JSON array, so there's no wrapper response type.
+struct Device: Codable, Hashable, Identifiable {
+    let name: String     // account display name advertised by the device
+    let addr: String     // control API host:port
+    let client: String   // client/platform id (tui, darwin/macos, windows, …)
+    let version: String  // OpenDeezer version
+
+    var id: String { addr }
+
+    // Human device type from the engine's client id.
+    var typeLabel: String {
+        switch client {
+        case "tui": return "Terminal"
+        case "darwin", "macos": return "macOS"
+        case "windows": return "Windows"
+        case "linux", "gnome", "kde": return "Linux"
+        default: return client.isEmpty ? "Device" : client.capitalized
+        }
+    }
+
+    // SF Symbol matching the device type.
+    var symbol: String {
+        switch client {
+        case "tui": return "terminal"
+        case "darwin", "macos": return "laptopcomputer"
+        case "windows": return "pc"
+        case "linux", "gnome", "kde": return "desktopcomputer"
+        default: return "music.note.tv"
+        }
+    }
+}
+
 // Account tier + entitlements (DZAccountJSON).
 struct Account: Codable {
     let userId: String

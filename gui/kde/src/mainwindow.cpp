@@ -96,6 +96,15 @@ extern "C" void  DZSetCrossfadeMS(int ms);
 extern "C" int   DZCrossfadeMS(void);
 extern "C" void  DZPreload(char *trackID, long long durationMs);
 
+// OpenDeezer Connect (LAN device transfer). Redeclared here (like the blocks
+// above) so the GUI still builds against an older generated header; identical
+// redeclarations are harmless. char* results are malloc'd — free with DZFree.
+extern "C" char *DZDiscoverDevices(int timeoutMS); // JSON [{name,addr,client,version}]
+extern "C" int   DZConnectDevice(char *addr);      // 1 ok, 0 fail; addr = host:port
+extern "C" void  DZDisconnectDevice(void);         // return playback to this computer
+extern "C" char *DZConnectedDevice(void);          // host:port ("" if local)
+extern "C" void  DZSetClientInfo(char *client, char *device); // call BEFORE DZInit
+
 namespace {
 
 const char *kAccent = "#A238FF"; // Deezer "Electric Violet"
@@ -220,6 +229,34 @@ QVector<Track> parseTracks(const QByteArray &json) {
     return out;
 }
 
+// DZDiscoverDevices returns a JSON array (not an object) of device records.
+QVector<ConnectDevice> parseDevices(const QByteArray &json) {
+    QVector<ConnectDevice> out;
+    for (const QJsonValue &v : QJsonDocument::fromJson(json).array()) {
+        const QJsonObject o = v.toObject();
+        ConnectDevice d;
+        d.name    = o.value("name").toString();
+        d.addr    = o.value("addr").toString();
+        d.client  = o.value("client").toString();
+        d.version = o.value("version").toString();
+        out.push_back(d);
+    }
+    return out;
+}
+
+// Friendly device type from a client id (mirrors the engine + the other GUIs).
+QString deviceTypeLabel(const QString &client) {
+    if (client == QLatin1String("tui"))     return QStringLiteral("Terminal");
+    if (client == QLatin1String("darwin") || client == QLatin1String("macos"))
+        return QStringLiteral("macOS");
+    if (client == QLatin1String("windows")) return QStringLiteral("Windows");
+    if (client == QLatin1String("linux") || client == QLatin1String("gnome") ||
+        client == QLatin1String("kde"))
+        return QStringLiteral("Linux");
+    if (client.isEmpty())                   return QStringLiteral("OpenDeezer");
+    return client;
+}
+
 // ARL: $DEEZER_ARL first, then ~/.config/opendeezer/arl.txt (legacy deezertui).
 QString loadARL() {
     const QByteArray env = qgetenv("DEEZER_ARL");
@@ -285,6 +322,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle("OpenDeezer");
     setWindowIcon(appIcon());
     setMinimumSize(900, 600);
+
+    // Identify this front-end on the LAN for OpenDeezer Connect (discovery +
+    // /whoami). Must run before DZInit; "kde" maps to a "Linux" device type.
+    {
+        QByteArray client = "kde";
+        QByteArray device = "OpenDeezer (KDE)";
+        DZSetClientInfo(cstr(client), cstr(device));
+    }
 
     // Load persisted settings (config dir lives alongside arl.txt).
     const QString cfg = settingsPath();
@@ -854,6 +899,14 @@ QWidget *MainWindow::buildTransport() {
     });
     h->addWidget(m_repeatBtn);
 
+    // OpenDeezer Connect: cast playback to another OpenDeezer device on the LAN.
+    m_connectBtn = new QToolButton;
+    m_connectBtn->setText(QString::fromUtf8("\xF0\x9F\x93\xA1")); // 📡
+    m_connectBtn->setAutoRaise(true);
+    m_connectBtn->setToolTip(QStringLiteral("Connect to a device"));
+    connect(m_connectBtn, &QToolButton::clicked, this, &MainWindow::openConnectPicker);
+    h->addWidget(m_connectBtn);
+
     h->addWidget(new QLabel("Vol"));
     m_vol = new QSlider(Qt::Horizontal);
     m_vol->setRange(0, 100);
@@ -952,6 +1005,7 @@ void MainWindow::finishLogin(const QByteArray &acct) {
         DZSetAudioDevice(cstr(db));
     }
     applyQuality(m_quality);     // apply persisted quality (+ entitlement note)
+    refreshConnectButton();      // reflect any active OpenDeezer Connect device
     m_poll->start();
     m_sidebar->setCurrentRow(0); // triggers loadFavorites()
     const QString conn = (m_haveAccount && !m_accountName.isEmpty())
@@ -2277,6 +2331,139 @@ void MainWindow::setVolume(int percent) {
     DZSetVolume(percent / 100.0);
     if (m_mpris)
         m_mpris->updateVolume(percent / 100.0);
+}
+
+// ---- OpenDeezer Connect (LAN device picker) -------------------------------
+
+// Cast button: discover OpenDeezer instances on the LAN, then offer a Spotify-
+// Connect-style picker. Discovery blocks ~0.7s on the network, so it runs on a
+// worker and the modal picker opens with the results (mirroring addTrackToPlaylist).
+void MainWindow::openConnectPicker() {
+    if (!m_loggedIn)
+        return;
+    statusBar()->showMessage(QStringLiteral("Scanning for devices…"));
+    QtConcurrent::run([this] {
+        const QVector<ConnectDevice> devs = parseDevices(takeJson(DZDiscoverDevices(700)));
+        QString connected;
+        if (char *c = DZConnectedDevice()) {
+            connected = QString::fromUtf8(c);
+            DZFree(c);
+        }
+        QMetaObject::invokeMethod(this, [this, devs, connected] {
+            statusBar()->clearMessage();
+            showConnectPicker(devs, connected);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::showConnectPicker(const QVector<ConnectDevice> &devices,
+                                   const QString &connectedAddr) {
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("OpenDeezer Connect"));
+    auto *v = new QVBoxLayout(&dlg);
+    v->addWidget(new QLabel(QStringLiteral("Play on a device:")));
+    auto *list = new QListWidget;
+
+    // Mark the active entry (bold + accent), matching the lyrics-highlight style.
+    auto markActive = [](QListWidgetItem *it) {
+        QFont f = it->font();
+        f.setBold(true);
+        it->setFont(f);
+        it->setForeground(QBrush(QColor(kAccent)));
+    };
+
+    // "This computer" — selecting it returns playback here (DZDisconnectDevice).
+    auto *here = new QListWidgetItem(QStringLiteral("This computer\nLocal playback"));
+    here->setData(Qt::UserRole, QString());  // empty addr = local
+    list->addItem(here);
+    QListWidgetItem *active = here;          // current connection (default: local)
+    if (connectedAddr.isEmpty())
+        markActive(here);
+
+    for (const ConnectDevice &d : devices) {
+        QString sub = deviceTypeLabel(d.client);
+        if (!d.version.isEmpty())
+            sub += QStringLiteral(" · OpenDeezer ") + d.version;
+        auto *it = new QListWidgetItem(
+            (d.name.isEmpty() ? QStringLiteral("OpenDeezer") : d.name) + "\n" + sub);
+        it->setData(Qt::UserRole, d.addr);
+        it->setData(Qt::UserRole + 1, d.name);
+        list->addItem(it);
+        if (!d.addr.isEmpty() && d.addr == connectedAddr) {
+            markActive(it);
+            active = it;
+        }
+    }
+    if (devices.isEmpty()) {
+        auto *none = new QListWidgetItem(QStringLiteral("No devices found on your network."));
+        none->setFlags(Qt::NoItemFlags); // a hint, not a selectable row
+        list->addItem(none);
+    }
+
+    list->setCurrentItem(active);
+    v->addWidget(list, 1);
+    auto *bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    v->addWidget(bb);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(list, &QListWidget::itemActivated, &dlg, &QDialog::accept);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+    QListWidgetItem *sel = list->currentItem();
+    if (!sel || !(sel->flags() & Qt::ItemIsSelectable))
+        return;
+    const QString addr = sel->data(Qt::UserRole).toString();
+    if (addr.isEmpty())
+        disconnectDevice();
+    else
+        connectDevice(addr, sel->data(Qt::UserRole + 1).toString());
+}
+
+// Route playback to the chosen device. DZConnectDevice does a network handshake,
+// so it runs on a worker; the button + status bar reflect the result.
+void MainWindow::connectDevice(const QString &addr, const QString &name) {
+    const QByteArray ab = addr.toUtf8();
+    const QString label = name.isEmpty() ? addr : name;
+    m_connectName = label;
+    statusBar()->showMessage(QStringLiteral("Connecting to %1…").arg(label));
+    QtConcurrent::run([this, ab, label] {
+        const int ok = DZConnectDevice(cstr(ab));
+        QMetaObject::invokeMethod(this, [this, ok, label] {
+            if (!ok)
+                m_connectName.clear();
+            statusBar()->showMessage(ok
+                ? QStringLiteral("Playing on %1").arg(label)
+                : QStringLiteral("Couldn't connect to %1").arg(label), 4000);
+            refreshConnectButton();
+        }, Qt::QueuedConnection);
+    });
+}
+
+// Return playback to this computer. DZDisconnectDevice is local + instant.
+void MainWindow::disconnectDevice() {
+    DZDisconnectDevice();
+    m_connectName.clear();
+    statusBar()->showMessage(QStringLiteral("Playing on this computer"), 3000);
+    refreshConnectButton();
+}
+
+// Paint the cast button: accent + the device name in the tooltip when routed to
+// a remote device, plain otherwise. The connected address is authoritative.
+void MainWindow::refreshConnectButton() {
+    if (!m_connectBtn)
+        return;
+    QString connected;
+    if (char *c = DZConnectedDevice()) {
+        connected = QString::fromUtf8(c);
+        DZFree(c);
+    }
+    const bool remote = !connected.isEmpty();
+    m_connectBtn->setStyleSheet(remote ? QString("QToolButton{color:%1;}").arg(kAccent)
+                                       : QString());
+    m_connectBtn->setToolTip(remote
+        ? QStringLiteral("Connected to %1 — choose a device")
+              .arg(m_connectName.isEmpty() ? connected : m_connectName)
+        : QStringLiteral("Connect to a device"));
 }
 
 // ---- poll loop ------------------------------------------------------------
