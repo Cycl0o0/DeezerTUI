@@ -87,8 +87,10 @@ func (c *Client) Whoami() (Whoami, error) {
 // Status returns the current playback snapshot.
 func (c *Client) Status() (State, error) { return c.state(http.MethodGet, "/status") }
 
-// Transport / mutation commands. Each returns the post-command status snapshot
-// (which may lag the command by one tick on the server — see act() docs).
+// The transport / mutation commands below each return the post-command status
+// snapshot (which may lag the command by one tick on the server — see act docs).
+
+// PlayPause toggles play/pause on the peer.
 func (c *Client) PlayPause() (State, error) { return c.state(http.MethodPost, "/playpause") }
 func (c *Client) Next() (State, error)      { return c.state(http.MethodPost, "/next") }
 func (c *Client) Prev() (State, error)      { return c.state(http.MethodPost, "/prev") }
