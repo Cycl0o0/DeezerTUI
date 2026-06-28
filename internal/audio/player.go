@@ -110,6 +110,8 @@ type Player struct {
 	rgOn        atomic.Bool
 	gapless     atomic.Bool
 	crossfadeMS atomic.Int64
+	cbCount     atomic.Int64 // audio callbacks served (diagnostics)
+	cbUnderrun  atomic.Int64 // callbacks with a short read (ring starvation)
 	onFinish    func()
 
 	stopMgr chan struct{}
@@ -264,6 +266,14 @@ func (p *Player) onSamples(out, _ []byte, _ uint32) {
 
 	applyGain(out[:n], p.effectiveVolume())
 	p.played.Add(int64(n))
+
+	// Diagnostics: a short read means the ring didn't have a full callback's
+	// worth of PCM ready (decode/producer starvation). Counted so we can tell
+	// ring-underrun glitches from device/callback-jitter glitches.
+	p.cbCount.Add(1)
+	if n < len(out) {
+		p.cbUnderrun.Add(1)
+	}
 }
 
 // ---- volume ----
@@ -341,11 +351,23 @@ func (p *Player) Preload(plan *deezer.StreamPlan, durationMS int64) {
 func (p *Player) manage() {
 	ticker := time.NewTicker(40 * time.Millisecond)
 	defer ticker.Stop()
+	ticks := 0
 	for {
 		select {
 		case <-p.stopMgr:
 			return
 		case <-ticker.C:
+			// Diagnostics: log callback/underrun counts every ~5s while playing.
+			if ticks++; ticks%125 == 0 {
+				if c := p.cbCount.Load(); c > 0 {
+					var rb int
+					if cur := p.cur.Load(); cur != nil {
+						rb = cur.ring.buffered()
+					}
+					odlog.Info("audio: callbacks=%d underruns=%d ringBuf=%dKB state=%v",
+						c, p.cbUnderrun.Load(), rb/1024, p.State())
+				}
+			}
 			if State(p.state.Load()) != Playing {
 				continue
 			}
