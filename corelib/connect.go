@@ -12,6 +12,8 @@ package main
 import "C"
 
 import (
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
@@ -19,6 +21,20 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
 	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
 )
+
+// selfControlPort is this instance's control API port (0 if disabled), used to
+// filter our own responder out of discovery results.
+func selfControlPort() int {
+	if ctrlSrv == nil {
+		return 0
+	}
+	_, port, err := net.SplitHostPort(ctrlSrv.Addr())
+	if err != nil {
+		return 0
+	}
+	p, _ := strconv.Atoi(port)
+	return p
+}
 
 var (
 	remoteCli  *control.Client // non-nil => playback routed to a remote device
@@ -56,6 +72,28 @@ func DZSetClientInfo(client, device *C.char) {
 	mu.Unlock()
 }
 
+// DZNowPlayingJSON returns the track actually playing right now as a jTrack:
+// when routed to a device it is the remote's current track (so the controller's
+// now-playing stays in sync); otherwise the local current track (which also
+// reflects tracks started via the control API). "{}" when nothing is playing.
+//
+//export DZNowPlayingJSON
+func DZNowPlayingJSON() *C.char {
+	if routedRemote() != nil {
+		if t := remoteSnapshot().Track; t != nil {
+			return jsonStr(jTrack{
+				ID: t.ID, Name: t.Title, ArtistLine: t.Artist, AlbumName: t.Album,
+				Explicit: t.Explicit, DurationMS: t.DurationMS,
+			}, nil)
+		}
+		return jsonStr(map[string]any{}, nil)
+	}
+	if cur := currentTrack(); cur.ID != "" {
+		return jsonStr(toJTrack(cur), nil)
+	}
+	return jsonStr(map[string]any{}, nil)
+}
+
 // DZDiscoverDevices broadcasts a LAN probe and returns the OpenDeezer devices
 // found, as a JSON array of {name, addr}. timeoutMS bounds the wait (~600ms is a
 // good default).
@@ -66,7 +104,7 @@ func DZDiscoverDevices(timeoutMS C.int) *C.char {
 	if ms <= 0 {
 		ms = 600
 	}
-	devs, err := discovery.Discover(time.Duration(ms) * time.Millisecond)
+	devs, err := discovery.Discover(time.Duration(ms)*time.Millisecond, selfControlPort())
 	if devs == nil {
 		devs = []discovery.Device{}
 	}
