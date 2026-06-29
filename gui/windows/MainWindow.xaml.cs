@@ -46,6 +46,9 @@ using Windows.Media;
 using Windows.Storage.Streams;
 using Windows.System;
 using Windows.UI;
+// Both Microsoft.UI.Dispatching and Windows.System expose DispatcherQueueTimer;
+// WinUI 3 uses the Microsoft.UI one.
+using DispatcherQueueTimer = Microsoft.UI.Dispatching.DispatcherQueueTimer;
 
 namespace OpenDeezer;
 
