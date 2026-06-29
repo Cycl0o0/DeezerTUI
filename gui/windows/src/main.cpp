@@ -2733,7 +2733,7 @@ struct App : mux::ApplicationT<App> {
     App() {
         // Surface any unhandled XAML/dispatcher exception (coroutines, timers,
         // event handlers) as a dialog instead of a silent stowed-exception crash.
-        UnhandledException([](winrt::IInspectable const&, mux::UnhandledExceptionEventArgs const& e) {
+        UnhandledException([](wf::IInspectable const&, mux::UnhandledExceptionEventArgs const& e) {
             std::wstring m = L"OpenDeezer hit an unhandled error:\n\n" + std::wstring(e.Message());
             MessageBoxW(nullptr, m.c_str(), L"OpenDeezer", MB_OK | MB_ICONERROR);
         });
