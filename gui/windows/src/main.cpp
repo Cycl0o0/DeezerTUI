@@ -69,6 +69,8 @@
 #include <vector>
 #include <functional>
 #include <map>
+#include <exception>
+#include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <cwctype>
@@ -2742,8 +2744,30 @@ private:
 };
 
 int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    srand(GetTickCount());                                         // vary shuffle per run
-    winrt::init_apartment(winrt::apartment_type::single_threaded); // STA required for XAML
-    mux::Application::Start([](auto&&) { winrt::make<App>(); });
+    srand(GetTickCount()); // vary shuffle per run
+    // SubSystem=Windows means an uncaught startup exception kills the process
+    // silently (no window, no message). Catch it and show the real error so a
+    // launch failure is diagnosable instead of "nothing happens" — the usual
+    // culprits are a missing VC++ runtime, the Edge WebView2 runtime, or the
+    // Windows App SDK runtime failing to activate.
+    try {
+        winrt::init_apartment(winrt::apartment_type::single_threaded); // STA for XAML
+        mux::Application::Start([](auto&&) { winrt::make<App>(); });
+    } catch (const winrt::hresult_error& e) {
+        wchar_t buf[512];
+        swprintf_s(buf, L"OpenDeezer failed to start.\n\nError 0x%08X: %s\n\n"
+                        L"If this persists, install the Microsoft Visual C++ 2015-2022 "
+                        L"Redistributable (x64) and the Microsoft Edge WebView2 Runtime.",
+                   static_cast<unsigned>(e.code()), e.message().c_str());
+        MessageBoxW(nullptr, buf, L"OpenDeezer", MB_OK | MB_ICONERROR);
+        return 1;
+    } catch (const std::exception& e) {
+        MessageBoxA(nullptr, e.what(), "OpenDeezer failed to start", MB_OK | MB_ICONERROR);
+        return 1;
+    } catch (...) {
+        MessageBoxW(nullptr, L"OpenDeezer failed to start (unknown error).", L"OpenDeezer",
+                    MB_OK | MB_ICONERROR);
+        return 1;
+    }
     return 0;
 }
