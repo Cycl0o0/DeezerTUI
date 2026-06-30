@@ -189,6 +189,7 @@ struct Sidebar: View {
                 set: { sel in
                     app.section = sel
                     switch sel {
+                    case .home: app.loadHome()
                     case .liked: app.loadFavorites()
                     case .playlists: app.loadPlaylists()
                     case .charts: app.loadCharts()
@@ -196,6 +197,7 @@ struct Sidebar: View {
                     case .search, .podcasts: break
                     }
                 })) {
+                SidebarLabel("Home", "house.fill", .home)
                 SidebarLabel("Search", "magnifyingglass", .search)
 
                 SwiftUI.Section {
@@ -331,6 +333,8 @@ struct DetailView: View {
     var body: some View {
         Group {
             switch app.section {
+            case .home:
+                HomeView()
             case .liked, .flow:
                 TrackListScreen()
             case .charts:

@@ -56,6 +56,9 @@ internal sealed class AudioDevice { public string Id = "", Name = ""; public boo
 // DZDiscoverDevices -> [{name,addr,client,version}].
 internal sealed class ConnectDevice { public string Name = "", Addr = "", Client = "", Version = ""; }
 
+// DZHomeJSON -> {"topTracks":[T],"topAlbums":[A],"playlists":[P]}
+internal sealed class HomeData { public List<Track> TopTracks = new(); public List<Playlist> Playlists = new(); }
+
 // Persisted settings. quality: 0 Normal,1 High,2 HiFi. audioDevice "" = default. crossfadeMs 0 = off.
 internal sealed class Settings
 {
@@ -355,6 +358,29 @@ internal static class Wire
                     Version = v.Str("version"),
                 });
         return outl;
+    }
+
+    public static HomeData ParseHome(string json)
+    {
+        var h = new HomeData();
+        using var doc = TryParse(json);
+        if (doc == null) return h;
+        var o = doc.RootElement;
+        var tracks = o.Arr("topTracks");
+        if (tracks.ValueKind == JsonValueKind.Array)
+            foreach (var v in tracks.EnumerateArray()) h.TopTracks.Add(TrackFromObj(v));
+        var plists = o.Arr("playlists");
+        if (plists.ValueKind == JsonValueKind.Array)
+            foreach (var v in plists.EnumerateArray())
+                h.Playlists.Add(new Playlist
+                {
+                    Id = v.Str("id"),
+                    Name = v.Str("name"),
+                    Owner = v.Str("owner"),
+                    TrackCount = (int)v.Num("trackCount"),
+                    ArtworkUrl = v.Str("artworkUrl"),
+                });
+        return h;
     }
 }
 

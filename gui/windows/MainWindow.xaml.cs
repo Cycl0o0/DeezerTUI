@@ -105,8 +105,8 @@ public sealed partial class MainWindow : Window
         Grid.SetRow(bar, 1);
         RootGrid.Children.Add(bar);
 
-        _nav.Content = _tracksPage; // show the (empty) Liked page until login fills it
-        _nav.Header = "Liked Songs";
+        _nav.Content = _homePage; // show the (empty) Home page until login fills it
+        _nav.Header = "Home";
     }
 
     private NavigationViewItem NavItem(string text, Symbol sym, string tag) =>
@@ -121,12 +121,14 @@ public sealed partial class MainWindow : Window
             IsSettingsVisible = false,
             PaneTitle = "OpenDeezer",
         };
+        _homeItem = NavItem("Home", Symbol.Home, "home");
         _likedItem = NavItem("Liked Songs", Symbol.Audio, "liked");
         _flowItem = NavItem("Flow", Symbol.Play, "flow");
         _playlistsItem = NavItem("Playlists", Symbol.List, "playlists");
         _chartsItem = NavItem("Charts", Symbol.World, "charts");
         _podcastsItem = NavItem("Podcasts", Symbol.Microphone, "podcasts");
         _searchItem = NavItem("Search", Symbol.Find, "search");
+        _nav.MenuItems.Add(_homeItem);
         _nav.MenuItems.Add(_likedItem);
         _nav.MenuItems.Add(_flowItem);
         _nav.MenuItems.Add(_playlistsItem);
@@ -213,6 +215,7 @@ public sealed partial class MainWindow : Window
 
         _searchPage = sp;
 
+        BuildHomePage();
         BuildArtistPage();
         BuildLyricsPage();
         BuildChartsPage();
@@ -298,6 +301,78 @@ public sealed partial class MainWindow : Window
         Grid.SetRow(_podcastGrid, 2); pp.Children.Add(_podcastGrid);
 
         _podcastPage = pp;
+    }
+
+    // Home: time-based greeting + quick-pick cards + Top Tracks list + playlists rail.
+    private void BuildHomePage()
+    {
+        _homeScroll = new ScrollViewer
+        {
+            Padding = new Thickness(16, 12, 16, 16),
+            HorizontalScrollMode = ScrollMode.Disabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        };
+        var col = new StackPanel { Spacing = 8 };
+
+        // Greeting -- refreshed to the current hour each time LoadHome() runs.
+        int hour = DateTime.Now.Hour;
+        string greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+        _homeGreeting = new TextBlock
+        {
+            Text = greeting,
+            FontSize = 32,
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 4),
+        };
+        col.Children.Add(_homeGreeting);
+
+        // Quick-pick cards: tap to navigate to that existing page.
+        var quickRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, Margin = new Thickness(0, 8, 0, 4) };
+        quickRow.Children.Add(MakeQuickCard("Liked Songs", Symbol.Audio, () => { _nav.SelectedItem = _likedItem; }));
+        quickRow.Children.Add(MakeQuickCard("Flow", Symbol.Play, () => { _nav.SelectedItem = _flowItem; }));
+        quickRow.Children.Add(MakeQuickCard("Charts", Symbol.World, () => { _nav.SelectedItem = _chartsItem; }));
+        quickRow.Children.Add(MakeQuickCard("Podcasts", Symbol.Microphone, () => { _nav.SelectedItem = _podcastsItem; }));
+        col.Children.Add(quickRow);
+
+        // Top Tracks (vertical list; inner scroll disabled so the outer ScrollViewer drives).
+        col.Children.Add(Section("Top Tracks"));
+        _homeTrackList = new ListView { SelectionMode = ListViewSelectionMode.None, IsItemClickEnabled = true };
+        _homeTrackList.ItemClick += OnHomeTrackClick;
+        NoInnerScroll(_homeTrackList);
+        col.Children.Add(_homeTrackList);
+
+        // Your Playlists (horizontal scroll rail of tiles).
+        col.Children.Add(Section("Your Playlists"));
+        _homePlaylistScroll = new ScrollViewer
+        {
+            HorizontalScrollMode = ScrollMode.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollMode = ScrollMode.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Margin = new Thickness(0, 0, 0, 8),
+        };
+        _homePlaylistPanel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        _homePlaylistScroll.Content = _homePlaylistPanel;
+        col.Children.Add(_homePlaylistScroll);
+
+        _homeScroll.Content = col;
+        _homePage = _homeScroll;
+    }
+
+    // A quick-pick navigation card: icon + label inside a standard Button.
+    private Button MakeQuickCard(string label, Symbol sym, Action onClick)
+    {
+        var sp = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        sp.Children.Add(new SymbolIcon(sym));
+        sp.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
+        var btn = new Button
+        {
+            Content = sp,
+            MinWidth = 128,
+            Padding = new Thickness(12, 10, 12, 10),
+        };
+        btn.Click += (_, _) => onClick();
+        return btn;
     }
 
     // Artist detail: a scrolling column of name/fans + Top Tracks + Albums +
@@ -694,7 +769,7 @@ public sealed partial class MainWindow : Window
         _nowTitle.Text = "Not playing";
         _nowArtist.Text = "";
         _suppressNav = false;
-        _nav.SelectedItem = _likedItem; // -> OnNav -> LoadFavorites
+        _nav.SelectedItem = _homeItem; // -> OnNav -> LoadHome
     }
 
     // Free-account block: replace the ENTIRE window content with a non-dismissible
@@ -871,7 +946,7 @@ public sealed partial class MainWindow : Window
             else if (tag == "phoneremote") ShowPhoneRemote();
             else ShowLoginChoice();
             _suppressNav = true;
-            nav.SelectedItem = _lastContentItem ?? _likedItem;
+            nav.SelectedItem = _lastContentItem ?? _homeItem;
             _suppressNav = false;
             return;
         }
@@ -879,6 +954,7 @@ public sealed partial class MainWindow : Window
         _lyricsShown = false; // leaving the lyrics/artist page for a menu page
         switch (tag)
         {
+            case "home": nav.Header = "Home"; nav.Content = _homePage; LoadHome(); break;
             case "liked": nav.Header = "Liked Songs"; nav.Content = _tracksPage; LoadFavorites(); break;
             case "flow": nav.Header = "Flow"; nav.Content = _tracksPage; LoadFlow(); break;
             case "charts": nav.Header = "Charts"; nav.Content = _chartsPage; LoadCharts(); break;
@@ -938,6 +1014,36 @@ public sealed partial class MainWindow : Window
         FillPlaylistGrid();
     }
 
+    // Home: fetch top tracks + playlists off-thread, update the greeting, then fill.
+    private async void LoadHome()
+    {
+        if (!_loggedIn) return;
+        var home = await Task.Run(() => DeezerCore.Home());
+        _homeTracks = home.TopTracks;
+        _homePlaylists = home.Playlists;
+        _artGen++;
+        // Refresh the greeting in case the hour changed since the page was built.
+        int hour = DateTime.Now.Hour;
+        _homeGreeting.Text = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+        FillTrackList(_homeTrackList, _homeTracks);
+        FillHomePlaylistRail();
+        try { _homeScroll.ChangeView(null, 0.0, null); } catch { }
+    }
+
+    private void FillHomePlaylistRail()
+    {
+        _homePlaylistPanel.Children.Clear();
+        for (int i = 0; i < _homePlaylists.Count; i++)
+        {
+            var p = _homePlaylists[i];
+            var tile = MakeTile(p.Name, p.Owner, p.ArtworkUrl, i);
+            int captured = i;
+            if (tile is FrameworkElement fe)
+                fe.Tapped += (_, _) => OpenPlaylist(_homePlaylists[captured]);
+            _homePlaylistPanel.Children.Add(tile);
+        }
+    }
+
     private async void OpenPlaylist(Playlist p)
     {
         _lyricsShown = false;
@@ -959,6 +1065,8 @@ public sealed partial class MainWindow : Window
         _artGen++;
         FillTrackList(_trackList, _tracks);
     }
+
+    private void OnHomeTrackClick(object s, ItemClickEventArgs e) { int i = TagIndex(e.ClickedItem); if (i >= 0) PlayFrom(_homeTracks, i); }
 
     // ---- charts activation ---------------------------------------------------
     private void OnChartsTrackClick(object s, ItemClickEventArgs e) { int i = TagIndex(e.ClickedItem); if (i >= 0) PlayFrom(_chartsTracks, i); }
@@ -2187,7 +2295,7 @@ public sealed partial class MainWindow : Window
     private DispatcherQueueTimer _timer = null!;
 
     private NavigationView _nav = null!;
-    private NavigationViewItem _likedItem = null!, _flowItem = null!, _playlistsItem = null!, _chartsItem = null!,
+    private NavigationViewItem _homeItem = null!, _likedItem = null!, _flowItem = null!, _playlistsItem = null!, _chartsItem = null!,
                                _podcastsItem = null!, _searchItem = null!, _accountItem = null!, _settingsItem = null!,
                                _phoneRemoteItem = null!, _aboutItem = null!;
     private NavigationViewItem? _lastContentItem; // null until the first content page is opened
@@ -2212,6 +2320,16 @@ public sealed partial class MainWindow : Window
     private TextBox _podcastBox = null!;
     private GridView _podcastGrid = null!;
     private List<Podcast> _podcasts = new();
+
+    // home page
+    private UIElement _homePage = null!;
+    private ScrollViewer _homeScroll = null!;
+    private TextBlock _homeGreeting = null!;
+    private ListView _homeTrackList = null!;
+    private ScrollViewer _homePlaylistScroll = null!;
+    private StackPanel _homePlaylistPanel = null!;
+    private List<Track> _homeTracks = new();
+    private List<Playlist> _homePlaylists = new();
 
     private Image _cover = null!;
     private TextBlock _nowTitle = null!, _nowArtist = null!, _posText = null!, _durText = null!;

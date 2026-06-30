@@ -16,6 +16,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
@@ -37,6 +38,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QRandomGenerator>
+#include <QScrollArea>
 #include <QSlider>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -46,6 +48,7 @@
 #include <QSystemTrayIcon>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTime>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -116,6 +119,12 @@ extern "C" char *DZNowPlayingJSON(void);
 // Both forward to the connected remote via the control API when routed.
 extern "C" void DZSetRepeat(int mode);   // 0=off, 1=all, 2=one
 extern "C" void DZSetShuffle(int on);    // 1=on, 0=off
+
+// Home aggregator. Returns {"topTracks":[jTrack],"topAlbums":[jAlbum],
+// "playlists":[jPlaylist]}; best-effort (empty sections when no data).
+// Redeclared here (like the blocks above) so the GUI still builds against an
+// older generated header; identical redeclarations are harmless.
+extern "C" char *DZHomeJSON(void);
 
 // Phone Web Remote. Redeclared here (like the blocks above) so the GUI still
 // builds against an older generated header; identical redeclarations are harmless.
@@ -366,14 +375,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     buildSidebar();
 
     m_stack = new QStackedWidget;
-    m_stack->addWidget(buildTracksPage());          // index 0
-    m_stack->addWidget(buildPlaylistsPage());       // index 1
-    m_stack->addWidget(buildSearchPage());          // index 2
-    m_stack->addWidget(buildLyricsPage());          // index 3
-    m_stack->addWidget(buildArtistPage());          // index 4
-    m_stack->addWidget(buildChartsPage());          // index 5
-    m_stack->addWidget(buildPodcastsPage());        // index 6
-    m_stack->addWidget(buildPodcastEpisodesPage()); // index 7
+    m_stack->addWidget(buildHomePage());            // index 0
+    m_stack->addWidget(buildTracksPage());          // index 1
+    m_stack->addWidget(buildPlaylistsPage());       // index 2
+    m_stack->addWidget(buildSearchPage());          // index 3
+    m_stack->addWidget(buildLyricsPage());          // index 4
+    m_stack->addWidget(buildArtistPage());          // index 5
+    m_stack->addWidget(buildChartsPage());          // index 6
+    m_stack->addWidget(buildPodcastsPage());        // index 7
+    m_stack->addWidget(buildPodcastEpisodesPage()); // index 8
 
     auto *split = new QSplitter(Qt::Horizontal);
     split->addWidget(m_sidebar);
@@ -765,40 +775,45 @@ void MainWindow::buildMenu() {
 void MainWindow::buildSidebar() {
     m_sidebar = new QListWidget;
     m_sidebar->setMaximumWidth(240);
-    m_sidebar->addItem(QStringLiteral("♥  Liked Songs")); // 0
-    m_sidebar->addItem(QStringLiteral("⚡  Flow"));         // 1
-    m_sidebar->addItem(QStringLiteral("☰  Playlists"));    // 2
-    m_sidebar->addItem(QStringLiteral("⌕  Search"));       // 3
-    m_sidebar->addItem(QStringLiteral("★  Charts"));       // 4
-    m_sidebar->addItem(QStringLiteral("◉  Podcasts"));     // 5
+    m_sidebar->addItem(QStringLiteral("⌂  Home"));         // 0
+    m_sidebar->addItem(QStringLiteral("♥  Liked Songs")); // 1
+    m_sidebar->addItem(QStringLiteral("⚡  Flow"));         // 2
+    m_sidebar->addItem(QStringLiteral("☰  Playlists"));    // 3
+    m_sidebar->addItem(QStringLiteral("⌕  Search"));       // 4
+    m_sidebar->addItem(QStringLiteral("★  Charts"));       // 5
+    m_sidebar->addItem(QStringLiteral("◉  Podcasts"));     // 6
     connect(m_sidebar, &QListWidget::currentRowChanged, this, &MainWindow::onSidebarChanged);
 }
 
 void MainWindow::onSidebarChanged(int row) {
     switch (row) {
-    case 0:
+    case 0:                                 // Home
         m_stack->setCurrentIndex(0);
+        loadHome();
+        break;
+    case 1:                                 // Liked Songs
+        m_stack->setCurrentIndex(1);
         loadFavorites();
         break;
-    case 1:
-        m_stack->setCurrentIndex(0); // Flow loads into the shared track table
+    case 2:                                 // Flow — shares the track table
+        m_stack->setCurrentIndex(1);
         loadFlow();
         break;
-    case 2:
-        m_stack->setCurrentIndex(1);
+    case 3:                                 // Playlists
+        m_stack->setCurrentIndex(2);
         loadPlaylists();
         break;
-    case 3:
-        m_stack->setCurrentIndex(2);
+    case 4:                                 // Search
+        m_stack->setCurrentIndex(3);
         if (m_searchEdit)
             m_searchEdit->setFocus();
         break;
-    case 4:
-        m_stack->setCurrentIndex(5); // dedicated charts page
+    case 5:                                 // Charts
+        m_stack->setCurrentIndex(6);
         loadCharts();
         break;
-    case 5:
-        m_stack->setCurrentIndex(6); // podcasts shows page
+    case 6:                                 // Podcasts
+        m_stack->setCurrentIndex(7);
         if (m_podcastSearchEdit)
             m_podcastSearchEdit->setFocus();
         break;
@@ -808,6 +823,222 @@ void MainWindow::onSidebarChanged(int row) {
 }
 
 // ---- pages ----------------------------------------------------------------
+
+// Home: the Discovery Home landing page. Wrapped in a QScrollArea so it scrolls
+// when the window is short. Built once; data is populated by loadHome() each time
+// the page becomes visible (the greeting is also refreshed for the time of day).
+QWidget *MainWindow::buildHomePage() {
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+
+    auto *w = new QWidget;
+    auto *v = new QVBoxLayout(w);
+    v->setContentsMargins(20, 20, 20, 20);
+    v->setSpacing(18);
+
+    // --- Time-based greeting (large, bold) ---
+    {
+        const int h = QTime::currentTime().hour();
+        const QString greet = h < 12 ? QStringLiteral("Good morning")
+                            : h < 18 ? QStringLiteral("Good afternoon")
+                                     : QStringLiteral("Good evening");
+        m_homeGreeting = new QLabel(greet);
+        QFont f = m_homeGreeting->font();
+        f.setPointSize(f.pointSize() + 12);
+        f.setBold(true);
+        m_homeGreeting->setFont(f);
+        m_homeGreeting->setStyleSheet(QString("color:%1;").arg(kAccent));
+    }
+    v->addWidget(m_homeGreeting);
+
+    // --- Quick-pick row: Liked Songs · Flow · Charts · Podcasts ---
+    // Each button triggers the same sidebar action the nav items already use, so
+    // the sidebar selection stays in sync.
+    {
+        auto *sectionLabel = new QLabel(QStringLiteral("Quick pick"));
+        QFont sf = sectionLabel->font();
+        sf.setPointSize(sf.pointSize() + 2);
+        sf.setBold(true);
+        sectionLabel->setFont(sf);
+        v->addWidget(sectionLabel);
+
+        struct QuickCard { const char *label; int sidebarRow; };
+        static const QuickCard kQuickCards[] = {
+            { "\xe2\x99\xa5  Liked Songs", 1 },   // ♥
+            { "\xe2\x9a\xa1  Flow",         2 },   // ⚡
+            { "\xe2\x98\x85  Charts",       5 },   // ★
+            { "\xe2\x97\x89  Podcasts",     6 },   // ◉
+        };
+        auto *row = new QHBoxLayout;
+        row->setSpacing(12);
+        for (const QuickCard &c : kQuickCards) {
+            auto *btn = new QToolButton;
+            btn->setText(QString::fromUtf8(c.label));
+            btn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+            btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            btn->setMinimumHeight(48);
+            btn->setStyleSheet(QStringLiteral(
+                "QToolButton{"
+                "  background:#2A1840;"
+                "  color:#FFFFFF;"
+                "  border-radius:8px;"
+                "  font-weight:bold;"
+                "  font-size:13px;"
+                "  padding:8px 14px;"
+                "}"
+                "QToolButton:hover{"
+                "  background:#A238FF;"
+                "}"));
+            const int row_ = c.sidebarRow;
+            connect(btn, &QToolButton::clicked, this, [this, row_] {
+                m_sidebar->setCurrentRow(row_);
+            });
+            row->addWidget(btn);
+        }
+        v->addLayout(row);
+    }
+
+    // --- Top Tracks horizontal rail ---
+    // Single-row, left-to-right, horizontal scroll; activating an item plays it.
+    {
+        auto *sectionLabel = new QLabel(QStringLiteral("Top Tracks"));
+        QFont sf = sectionLabel->font();
+        sf.setPointSize(sf.pointSize() + 2);
+        sf.setBold(true);
+        sectionLabel->setFont(sf);
+        v->addWidget(sectionLabel);
+
+        m_homeTracksRail = new QListWidget;
+        m_homeTracksRail->setViewMode(QListView::IconMode);
+        m_homeTracksRail->setFlow(QListView::LeftToRight);
+        m_homeTracksRail->setWrapping(false);
+        m_homeTracksRail->setIconSize(QSize(80, 80));
+        m_homeTracksRail->setGridSize(QSize(112, 138));
+        m_homeTracksRail->setResizeMode(QListView::Fixed);
+        m_homeTracksRail->setMovement(QListView::Static);
+        m_homeTracksRail->setWordWrap(true);
+        m_homeTracksRail->setFixedHeight(162);
+        m_homeTracksRail->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_homeTracksRail->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        connect(m_homeTracksRail, &QListWidget::itemActivated, this,
+                [this](QListWidgetItem *it) {
+                    const int idx = it->data(Qt::UserRole).toInt();
+                    if (idx >= 0 && idx < m_homeTracks.size())
+                        playFrom(m_homeTracks, idx);
+                });
+        v->addWidget(m_homeTracksRail);
+    }
+
+    // --- Your Playlists horizontal rail ---
+    // Same icon-card style as the Playlists page; activating one opens it.
+    {
+        auto *sectionLabel = new QLabel(QStringLiteral("Your Playlists"));
+        QFont sf = sectionLabel->font();
+        sf.setPointSize(sf.pointSize() + 2);
+        sf.setBold(true);
+        sectionLabel->setFont(sf);
+        v->addWidget(sectionLabel);
+
+        m_homePlaylistsRail = new QListWidget;
+        m_homePlaylistsRail->setViewMode(QListView::IconMode);
+        m_homePlaylistsRail->setFlow(QListView::LeftToRight);
+        m_homePlaylistsRail->setWrapping(false);
+        m_homePlaylistsRail->setIconSize(QSize(110, 110));
+        m_homePlaylistsRail->setGridSize(QSize(142, 168));
+        m_homePlaylistsRail->setResizeMode(QListView::Fixed);
+        m_homePlaylistsRail->setMovement(QListView::Static);
+        m_homePlaylistsRail->setWordWrap(true);
+        m_homePlaylistsRail->setFixedHeight(192);
+        m_homePlaylistsRail->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_homePlaylistsRail->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        connect(m_homePlaylistsRail, &QListWidget::itemActivated, this,
+                [this](QListWidgetItem *it) {
+                    const int idx = it->data(Qt::UserRole).toInt();
+                    if (idx >= 0 && idx < m_homePlaylists.size())
+                        openPlaylist(m_homePlaylists[idx]);
+                });
+        v->addWidget(m_homePlaylistsRail);
+    }
+
+    v->addStretch(1);
+    scroll->setWidget(w);
+    return scroll;
+}
+
+// Load Home data from DZHomeJSON off the GUI thread, then populate the two rails.
+// The greeting label is also refreshed for the current time of day on each visit.
+void MainWindow::loadHome() {
+    if (!m_loggedIn)
+        return;
+    // Refresh the greeting in case the time of day has changed since construction.
+    if (m_homeGreeting) {
+        const int h = QTime::currentTime().hour();
+        m_homeGreeting->setText(h < 12 ? QStringLiteral("Good morning")
+                              : h < 18 ? QStringLiteral("Good afternoon")
+                                       : QStringLiteral("Good evening"));
+    }
+    statusBar()->showMessage(QStringLiteral("Loading home…"));
+    QtConcurrent::run([this] {
+        const QByteArray j = takeJson(DZHomeJSON());
+        QMetaObject::invokeMethod(this, [this, j] {
+            const QJsonObject obj = QJsonDocument::fromJson(j).object();
+            const int gen = ++m_artGen;
+
+            // Top Tracks rail — play on activate (reuses playFrom + cover-art path).
+            m_homeTracks.clear();
+            for (const QJsonValue &v : obj.value("topTracks").toArray())
+                m_homeTracks.push_back(parseTrack(v.toObject()));
+            m_homeTracksRail->clear();
+            if (m_homeTracks.isEmpty()) {
+                m_homeTracksRail->addItem(
+                    new QListWidgetItem(QStringLiteral("No tracks available.")));
+            } else {
+                for (int i = 0; i < m_homeTracks.size(); ++i) {
+                    const Track &t = m_homeTracks[i];
+                    auto *it = new QListWidgetItem(
+                        QIcon(placeholderPix(80)),
+                        t.name + "\n" + t.artistLine);
+                    it->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+                    it->setData(Qt::UserRole, i);
+                    m_homeTracksRail->addItem(it);
+                    if (!t.artworkUrl.isEmpty())
+                        fetchImage(t.artworkUrl, gen, [it](const QImage &img) {
+                            it->setIcon(QIcon(QPixmap::fromImage(img).scaled(
+                                80, 80, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                        });
+                }
+            }
+
+            // Your Playlists rail — open on activate (reuses openPlaylist path).
+            m_homePlaylists.clear();
+            for (const QJsonValue &v : obj.value("playlists").toArray())
+                m_homePlaylists.push_back(parsePlaylist(v.toObject()));
+            m_homePlaylistsRail->clear();
+            if (m_homePlaylists.isEmpty()) {
+                m_homePlaylistsRail->addItem(
+                    new QListWidgetItem(QStringLiteral("No playlists available.")));
+            } else {
+                for (int i = 0; i < m_homePlaylists.size(); ++i) {
+                    const Playlist &p = m_homePlaylists[i];
+                    auto *it = new QListWidgetItem(
+                        QIcon(placeholderPix(110)),
+                        p.name + "\n" + p.owner);
+                    it->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+                    it->setData(Qt::UserRole, i);
+                    m_homePlaylistsRail->addItem(it);
+                    if (!p.artworkUrl.isEmpty())
+                        fetchImage(p.artworkUrl, gen, [it](const QImage &img) {
+                            it->setIcon(QIcon(QPixmap::fromImage(img).scaled(
+                                110, 110, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                        });
+                }
+            }
+
+            statusBar()->showMessage(QStringLiteral("Home"), 3000);
+        }, Qt::QueuedConnection);
+    });
+}
 
 QTableWidget *MainWindow::makeTrackTable() {
     auto *t = new QTableWidget(0, 4);
@@ -1198,7 +1429,7 @@ void MainWindow::finishLogin(const QByteArray &acct) {
     applyQuality(m_quality);     // apply persisted quality (+ entitlement note)
     refreshConnectButton();      // reflect any active OpenDeezer Connect device
     m_poll->start();
-    m_sidebar->setCurrentRow(0); // triggers loadFavorites()
+    m_sidebar->setCurrentRow(0); // triggers loadHome() — Home is the default landing
     const QString conn = (m_haveAccount && !m_accountName.isEmpty())
         ? m_accountName + " · " + m_accountOffer
         : QStringLiteral("Connected");
@@ -1417,7 +1648,7 @@ void MainWindow::openPlaylist(const Playlist &p) {
             const int gen = ++m_artGen;
             m_tableTracks = tracks;
             fillTrackTable(m_trackTable, tracks, gen);
-            m_stack->setCurrentIndex(0);
+            m_stack->setCurrentIndex(1); // track table page
             statusBar()->showMessage(QString("%1 tracks").arg(tracks.size()), 3000);
         }, Qt::QueuedConnection);
     });
@@ -1434,7 +1665,7 @@ void MainWindow::openAlbum(const Album &a) {
             const int gen = ++m_artGen;
             m_tableTracks = tracks;
             fillTrackTable(m_trackTable, tracks, gen);
-            m_stack->setCurrentIndex(0);
+            m_stack->setCurrentIndex(1); // track table page
             statusBar()->showMessage(QString("%1 tracks").arg(tracks.size()), 3000);
         }, Qt::QueuedConnection);
     });
@@ -1792,12 +2023,12 @@ void MainWindow::installTrackMenu(QTableWidget *table, QVector<Track> *src) {
             });
 }
 
-// Only the browse pages — tracks(0), playlists(1), search(2), charts(5),
-// podcasts(6) — are valid "Back" targets, never another detour page, so Back
-// from lyrics/artist always lands somewhere sensible.
+// Only the browse pages — home(0), tracks(1), playlists(2), search(3),
+// charts(6), podcasts(7) — are valid "Back" targets, never another detour page,
+// so Back from lyrics/artist always lands somewhere sensible.
 void MainWindow::rememberReturnPage() {
     const int cur = m_stack->currentIndex();
-    if (cur == 0 || cur == 1 || cur == 2 || cur == 5 || cur == 6)
+    if (cur == 0 || cur == 1 || cur == 2 || cur == 3 || cur == 6 || cur == 7)
         m_returnPage = cur;
 }
 
@@ -1993,7 +2224,7 @@ QWidget *MainWindow::buildPodcastEpisodesPage() {
     back->setText(QStringLiteral("‹ Back"));
     back->setAutoRaise(true);
     connect(back, &QToolButton::clicked, this,
-            [this] { m_stack->setCurrentIndex(6); }); // back to the shows grid
+            [this] { m_stack->setCurrentIndex(7); }); // back to the shows grid
     top->addWidget(back);
     m_podcastTitle = new QLabel(QStringLiteral("Episodes"));
     QFont tf = m_podcastTitle->font();
@@ -2058,7 +2289,7 @@ void MainWindow::runPodcastSearch() {
 void MainWindow::openPodcast(const Podcast &p) {
     m_currentPodcastName = p.name;
     m_podcastTitle->setText(p.name);
-    m_stack->setCurrentIndex(7);
+    m_stack->setCurrentIndex(8); // podcast episodes page
     m_episodes.clear();
     m_episodeList->clear();
     m_episodeList->addItem(new QListWidgetItem(QStringLiteral("Loading episodes…")));
@@ -2149,7 +2380,7 @@ void MainWindow::openLyrics() {
             }
             m_lyricsFollowsPlayback = true;
             rememberReturnPage();
-            m_stack->setCurrentIndex(3);
+            m_stack->setCurrentIndex(4);
             loadLyrics(np.id,
                        np.name + QStringLiteral("   ·   ") + np.artistLine);
             return;
@@ -2162,7 +2393,7 @@ void MainWindow::openLyrics() {
     }
     m_lyricsFollowsPlayback = true;
     rememberReturnPage();
-    m_stack->setCurrentIndex(3);
+    m_stack->setCurrentIndex(4);
     loadLyrics(m_current.id,
                m_current.name + QStringLiteral("   ·   ") + m_current.artistLine);
 }
@@ -2174,7 +2405,7 @@ void MainWindow::openLyricsFor(const QString &trackId, const QString &title) {
         return;
     m_lyricsFollowsPlayback = false;
     rememberReturnPage();
-    m_stack->setCurrentIndex(3);
+    m_stack->setCurrentIndex(4);
     loadLyrics(trackId, title);
 }
 
@@ -2323,7 +2554,7 @@ void MainWindow::openArtist(const QString &artistId) {
     if (!m_loggedIn || artistId.isEmpty())
         return;
     rememberReturnPage();
-    m_stack->setCurrentIndex(4);
+    m_stack->setCurrentIndex(5);
     statusBar()->showMessage(QStringLiteral("Loading artist…"));
 
     // Reset the page to a loading state.
@@ -2794,7 +3025,7 @@ void MainWindow::tick() {
     }
 
     // Lyrics page: follow the playing track and keep the synced line highlighted.
-    if (m_stack->currentIndex() == 3) {
+    if (m_stack->currentIndex() == 4) {
         if (m_lyricsFollowsPlayback && m_hasCurrent &&
             m_current.id != m_lyricsRequestedId)
             loadLyrics(m_current.id,

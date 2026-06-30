@@ -51,6 +51,7 @@ object Engine {
     suspend fun artistTop(id: String): List<Track> = io { Json.tracks(Odmobile.artistTop(id)) }
     suspend fun search(q: String): SearchResults = io { Json.search(Odmobile.search(q)) }
     suspend fun charts(): SearchResults = io { Json.search(Odmobile.charts()) }
+    suspend fun home(): HomeData = io { Json.home(runCatching { Odmobile.home() }.getOrNull()) }
     suspend fun searchPodcasts(q: String): List<Podcast> = io { Json.podcasts(Odmobile.searchPodcasts(q)) }
     suspend fun podcastEpisodes(id: String): List<Episode> = io { Json.episodes(Odmobile.podcastEpisodes(id)) }
     suspend fun lyrics(id: String): Lyrics = io { Json.lyrics(Odmobile.lyrics(id)) }

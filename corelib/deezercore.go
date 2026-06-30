@@ -628,6 +628,33 @@ func toJPlaylists(ps []deezer.Playlist) []jPlaylist {
 	return out
 }
 
+// DZHomeJSON aggregates the Home-screen sections in one call so every GUI shows
+// the same landing page: {topTracks, topAlbums} from the charts and the user's
+// own {playlists}. Best-effort — a section that fails to load comes back empty
+// rather than failing the whole page. The greeting + quick-pick cards
+// (Liked/Flow/Charts/Podcasts) are client-side.
+//
+//export DZHomeJSON
+func DZHomeJSON() *C.char {
+	mu.Lock()
+	c := client
+	mu.Unlock()
+	if c == nil {
+		return jsonStr(nil, errNotReady)
+	}
+	var tracks []deezer.Track
+	var albums []deezer.Album
+	if ch, err := c.Charts("0"); err == nil && ch != nil {
+		tracks, albums = ch.Tracks, ch.Albums
+	}
+	ps, _ := c.Playlists()
+	return jsonStr(map[string]any{
+		"topTracks": toJTracks(tracks),
+		"topAlbums": toJAlbums(albums),
+		"playlists": toJPlaylists(ps),
+	}, nil)
+}
+
 // DZArtistTopJSON returns an artist's most popular tracks.
 //
 //export DZArtistTopJSON

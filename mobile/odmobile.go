@@ -304,6 +304,32 @@ func Charts() string {
 	return searchJSON(ch.Tracks, ch.Albums, ch.Artists, ch.Playlists)
 }
 
+// Home aggregates the Home-screen sections (charts top tracks/albums + the
+// user's playlists) in one call, mirroring corelib DZHomeJSON. Best-effort.
+func Home() string {
+	return withClient(func(c *deezer.Client) (any, error) {
+		var tracks []deezer.Track
+		var albums []deezer.Album
+		if ch, err := c.Charts("0"); err == nil && ch != nil {
+			tracks, albums = ch.Tracks, ch.Albums
+		}
+		al := make([]jAlbum, len(albums))
+		for i, a := range albums {
+			as := make([]jArtist, len(a.Artists))
+			for j, ar := range a.Artists {
+				as[j] = jArtist{ID: ar.ID, Name: ar.Name}
+			}
+			al[i] = jAlbum{ID: a.ID, Name: a.Name, Artists: as, ArtworkURL: a.ArtworkURL}
+		}
+		ps, _ := c.Playlists()
+		pl := make([]jPlaylist, len(ps))
+		for i, p := range ps {
+			pl[i] = jPlaylist{ID: p.ID, Name: p.Name, Owner: p.Owner, TrackCount: p.TrackCount, ArtworkURL: p.ArtworkURL}
+		}
+		return map[string]any{"topTracks": toJTracks(tracks), "topAlbums": al, "playlists": pl}, nil
+	})
+}
+
 func searchJSON(tracks []deezer.Track, albums []deezer.Album, artists []deezer.ArtistInfo, playlists []deezer.Playlist) string {
 	al := make([]jAlbum, len(albums))
 	for i, a := range albums {
