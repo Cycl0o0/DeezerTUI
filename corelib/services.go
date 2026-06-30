@@ -29,7 +29,7 @@ var (
 	servicesOnce sync.Once
 	dp           discord.Presence
 	ctrlSrv      *control.Server
-	coreVersion  = "1.0.1"
+	coreVersion  = "1.0.2"
 
 	curMu    sync.Mutex
 	curTrack deezer.Track

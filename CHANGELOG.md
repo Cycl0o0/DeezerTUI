@@ -4,6 +4,15 @@ All notable changes to OpenDeezer are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2]
+
+### Added
+- **Public Go SDK**: the engine is now a public library you can build on —
+  `sdk/deezer` (Deezer API + track decode/download), `sdk/connect` (OpenDeezer
+  Connect LAN discovery + drive/host a device), `sdk/control` (control server +
+  client and phone web remote), and `sdk/player` (in-process playback, cgo).
+  Symmetric in/out APIs, runnable `examples/`, and full docs in `sdk/README.md`.
+
 ## [1.0.1]
 
 ### Added
