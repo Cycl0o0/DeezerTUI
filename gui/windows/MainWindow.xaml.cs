@@ -356,78 +356,89 @@ public sealed partial class MainWindow : Window
 
     private Grid BuildTransport()
     {
+        // Groove-Music-style Fluent bar: three zones - now-playing on the left,
+        // the transport CENTERED (play is a filled accent circle) with the seek
+        // bar + times directly under it, and secondary actions + volume on the
+        // right. [Star, Auto, Star] keeps the centre cluster dead-centre in the
+        // bar regardless of the left/right content widths.
         var bar = new Grid
         {
-            Padding = new Thickness(14, 10, 14, 10),
-            ColumnSpacing = 12,
+            Padding = new Thickness(16, 8, 16, 10),
             Background = new SolidColorBrush(Color.FromArgb(0x66, 0x14, 0x04, 0x1E)),
         };
-        bar.ColumnDefinitions.Add(ColAuto()); // cover
-        bar.ColumnDefinitions.Add(ColAuto()); // now text
-        bar.ColumnDefinitions.Add(ColAuto()); // transport buttons
-        bar.ColumnDefinitions.Add(ColAuto()); // pos
-        bar.ColumnDefinitions.Add(ColStar()); // seek
-        bar.ColumnDefinitions.Add(ColAuto()); // dur
-        bar.ColumnDefinitions.Add(ColAuto()); // shuffle/repeat
-        bar.ColumnDefinitions.Add(ColAuto()); // volume
+        bar.ColumnDefinitions.Add(ColStar()); // left zone (now-playing)
+        bar.ColumnDefinitions.Add(ColAuto()); // centre zone (transport + seek)
+        bar.ColumnDefinitions.Add(ColStar()); // right zone (actions + volume)
 
+        // ---- LEFT: cover + title/artist + like + add ----
+        var left = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
         _cover = new Image { Width = 48, Height = 48, VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetColumn(_cover, 0); bar.Children.Add(_cover);
-
-        var now = new StackPanel { VerticalAlignment = VerticalAlignment.Center, MinWidth = 170, MaxWidth = 300 };
+        left.Children.Add(_cover);
+        var now = new StackPanel { VerticalAlignment = VerticalAlignment.Center, MinWidth = 120, MaxWidth = 240 };
         _nowTitle = new TextBlock { Text = "Logging in…", FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis };
         _nowArtist = new TextBlock { Opacity = 0.6, FontSize = 12, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis };
         now.Children.Add(_nowTitle); now.Children.Add(_nowArtist);
-
-        // Quick actions: Like (heart toggle), Add-to-playlist, links to Lyrics + Artist.
-        var meta = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
-        _likeBtn = new ToggleButton { Content = new FontIcon { Glyph = "\uEB51", FontSize = 14 }, Padding = new Thickness(6, 2, 6, 2) }; // Heart
+        left.Children.Add(now);
+        _likeBtn = new ToggleButton { Content = new FontIcon { Glyph = "", FontSize = 14 }, Padding = new Thickness(6, 2, 6, 2) }; // Heart
         ToolTipService.SetToolTip(_likeBtn, "Like / unlike");
         _likeBtn.Click += OnLike;
-        _addBtn = new Button { Content = new FontIcon { Glyph = "\uECC8", FontSize = 14 }, Padding = new Thickness(6, 2, 6, 2) }; // Add to playlist
+        _addBtn = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 }, Padding = new Thickness(6, 2, 6, 2) }; // Add to playlist
         ToolTipService.SetToolTip(_addBtn, "Add to playlist");
         _addBtn.Click += OnAddCurrentToPlaylist;
-        _lyricsBtn = new HyperlinkButton { Content = "Lyrics", Padding = new Thickness(4, 0, 4, 0) };
-        _lyricsBtn.Click += (_, _) => ShowLyrics();
-        _artistBtn = new HyperlinkButton { Content = "Artist", Padding = new Thickness(4, 0, 4, 0) };
-        _artistBtn.Click += OnArtist;
-        meta.Children.Add(_likeBtn); meta.Children.Add(_addBtn);
-        meta.Children.Add(_lyricsBtn); meta.Children.Add(_artistBtn);
-        now.Children.Add(meta);
-        Grid.SetColumn(now, 1); bar.Children.Add(now);
+        left.Children.Add(_likeBtn); left.Children.Add(_addBtn);
+        Grid.SetColumn(left, 0); bar.Children.Add(left);
 
-        var tr = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
-        var prevBtn = new Button { Content = new FontIcon { Glyph = "\uE892" } }; // Previous
-        prevBtn.Click += (_, _) => Prev();
-        _playIcon = new FontIcon { Glyph = "\uE768" }; // Play
-        _playBtn = new Button { Content = _playIcon, Foreground = _accent };
-        _playBtn.Click += (_, _) => DeezerCore.DZTogglePause();
-        var nextBtn = new Button { Content = new FontIcon { Glyph = "\uE893" } }; // Next
-        nextBtn.Click += (_, _) => Next();
-        tr.Children.Add(prevBtn); tr.Children.Add(_playBtn); tr.Children.Add(nextBtn);
-        Grid.SetColumn(tr, 2); bar.Children.Add(tr);
-
-        _posText = new TextBlock { Text = "0:00", Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetColumn(_posText, 3); bar.Children.Add(_posText);
-
-        _seek = new Slider { Minimum = 0, Maximum = 1000, Value = 0, VerticalAlignment = VerticalAlignment.Center, Foreground = _accent };
-        _seek.ValueChanged += OnSeekChanged;
-        Grid.SetColumn(_seek, 4); bar.Children.Add(_seek);
-
-        _durText = new TextBlock { Text = "0:00", Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetColumn(_durText, 5); bar.Children.Add(_durText);
-
-        var modes = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
-        _shuffleBtn = new ToggleButton { Content = new FontIcon { Glyph = "\uE8B1" } }; // Shuffle
+        // ---- CENTRE: transport row (shuffle - prev - play - next - repeat) + seek row ----
+        var center = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+        var tr = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        _shuffleBtn = new ToggleButton { Content = new FontIcon { Glyph = "", FontSize = 14 } }; // Shuffle
+        ToolTipService.SetToolTip(_shuffleBtn, "Shuffle");
         _shuffleBtn.Click += OnShuffle;
-        _repeatBtn = new Button { Content = "Repeat: Off" };
+        var prevBtn = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 } }; // Previous
+        ToolTipService.SetToolTip(prevBtn, "Previous");
+        prevBtn.Click += (_, _) => Prev();
+        // Play/pause as a filled accent circle - the Groove signature.
+        _playIcon = new FontIcon { Glyph = "", FontSize = 16, Foreground = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF)) }; // Play (white on accent)
+        _playBtn = new Button
+        {
+            Content = _playIcon,
+            Width = 44, Height = 44, Padding = new Thickness(0),
+            CornerRadius = new CornerRadius(22),
+            Background = _accent,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+        };
+        ToolTipService.SetToolTip(_playBtn, "Play / pause");
+        _playBtn.Click += (_, _) => DeezerCore.DZTogglePause();
+        var nextBtn = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 } }; // Next
+        ToolTipService.SetToolTip(nextBtn, "Next");
+        nextBtn.Click += (_, _) => Next();
+        _repeatIcon = new FontIcon { Glyph = "", FontSize = 14 }; // RepeatAll
+        _repeatBtn = new Button { Content = _repeatIcon };
+        ToolTipService.SetToolTip(_repeatBtn, "Repeat: off");
         _repeatBtn.Click += OnRepeat;
-        modes.Children.Add(_shuffleBtn); modes.Children.Add(_repeatBtn);
-        Grid.SetColumn(modes, 6); bar.Children.Add(modes);
+        tr.Children.Add(_shuffleBtn); tr.Children.Add(prevBtn); tr.Children.Add(_playBtn); tr.Children.Add(nextBtn); tr.Children.Add(_repeatBtn);
+        center.Children.Add(tr);
 
-        var vol = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
+        var seekRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        _posText = new TextBlock { Text = "0:00", Opacity = 0.7, FontSize = 12, VerticalAlignment = VerticalAlignment.Center, MinWidth = 36, TextAlignment = TextAlignment.Right };
+        _seek = new Slider { Minimum = 0, Maximum = 1000, Value = 0, Width = 360, VerticalAlignment = VerticalAlignment.Center, Foreground = _accent };
+        _seek.ValueChanged += OnSeekChanged;
+        _durText = new TextBlock { Text = "0:00", Opacity = 0.7, FontSize = 12, VerticalAlignment = VerticalAlignment.Center, MinWidth = 36 };
+        seekRow.Children.Add(_posText); seekRow.Children.Add(_seek); seekRow.Children.Add(_durText);
+        center.Children.Add(seekRow);
+        Grid.SetColumn(center, 1); bar.Children.Add(center);
+
+        // ---- RIGHT: lyrics - artist - connect (cast) - volume ----
+        var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
+        _lyricsBtn = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 }, Padding = new Thickness(6, 2, 6, 2) }; // ClosedCaption
+        ToolTipService.SetToolTip(_lyricsBtn, "Lyrics");
+        _lyricsBtn.Click += (_, _) => ShowLyrics();
+        _artistBtn = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 }, Padding = new Thickness(6, 2, 6, 2) }; // Contact
+        ToolTipService.SetToolTip(_artistBtn, "Artist");
+        _artistBtn.Click += OnArtist;
         // OpenDeezer Connect: a discreet cast button whose flyout lists LAN devices.
-        _connectBtn = new Button { Content = new FontIcon { Glyph = "\uEC15" }, Padding = new Thickness(6, 2, 6, 2) }; // Cast
+        _connectBtn = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 }, Padding = new Thickness(6, 2, 6, 2) }; // Cast
         ToolTipService.SetToolTip(_connectBtn, "Connect to a device");
         _connectFlyout = new Flyout();
         var cp = new StackPanel { Spacing = 8, MinWidth = 280, Padding = new Thickness(4) };
@@ -439,12 +450,12 @@ public sealed partial class MainWindow : Window
         _connectFlyout.Content = cp;
         _connectFlyout.Opened += OnConnectOpened;
         _connectBtn.Flyout = _connectFlyout;
-        vol.Children.Add(_connectBtn);
-        vol.Children.Add(new FontIcon { Glyph = "\uE767", VerticalAlignment = VerticalAlignment.Center }); // Volume
-        _volume = new Slider { Minimum = 0, Maximum = 100, Value = 100, Width = 120, VerticalAlignment = VerticalAlignment.Center, Foreground = _accent };
+        var volIcon = new FontIcon { Glyph = "", FontSize = 14, VerticalAlignment = VerticalAlignment.Center }; // Volume
+        _volume = new Slider { Minimum = 0, Maximum = 100, Value = 100, Width = 100, VerticalAlignment = VerticalAlignment.Center, Foreground = _accent };
         _volume.ValueChanged += OnVolumeChanged;
-        vol.Children.Add(_volume);
-        Grid.SetColumn(vol, 7); bar.Children.Add(vol);
+        right.Children.Add(_lyricsBtn); right.Children.Add(_artistBtn); right.Children.Add(_connectBtn);
+        right.Children.Add(volIcon); right.Children.Add(_volume);
+        Grid.SetColumn(right, 2); bar.Children.Add(right);
 
         return bar;
     }
@@ -1525,11 +1536,13 @@ public sealed partial class MainWindow : Window
         if (_queueIndex > 0) --_queueIndex;
         PlayCurrent();
     }
-    private void OnShuffle(object s, RoutedEventArgs e) { _shuffle = _shuffleBtn.IsChecked == true; DeezerCore.DZSetShuffle(_shuffle ? 1 : 0); }
+    private void OnShuffle(object s, RoutedEventArgs e) { _shuffle = _shuffleBtn.IsChecked == true; DeezerCore.DZSetShuffle(_shuffle ? 1 : 0); if (_shuffle) _shuffleBtn.Foreground = _accent; else _shuffleBtn.ClearValue(Control.ForegroundProperty); }
     private void OnRepeat(object s, RoutedEventArgs e)
     {
         _repeat = (_repeat + 1) % 3;
-        _repeatBtn.Content = _repeat == 0 ? "Repeat: Off" : _repeat == 1 ? "Repeat: All" : "Repeat: One";
+        _repeatIcon.Glyph = _repeat == 2 ? "" : ""; // RepeatOne or RepeatAll
+        if (_repeat == 0) _repeatBtn.ClearValue(Control.ForegroundProperty); else _repeatBtn.Foreground = _accent;
+        ToolTipService.SetToolTip(_repeatBtn, _repeat == 0 ? "Repeat: off" : _repeat == 1 ? "Repeat: all" : "Repeat: one");
         DeezerCore.DZSetRepeat(_repeat);
     }
     private void OnSeekChanged(object s, RangeBaseValueChangedEventArgs e)
@@ -2207,10 +2220,9 @@ public sealed partial class MainWindow : Window
     private string _engineNowId = "";       // last id DZNowPlayingJSON reported
     private string _engineNowArtistId = ""; // last artistId DZNowPlayingJSON reported (B3: Connect artist nav)
     private Slider _seek = null!, _volume = null!;
-    private Button _playBtn = null!, _repeatBtn = null!, _addBtn = null!;
-    private FontIcon _playIcon = null!;
+    private Button _playBtn = null!, _repeatBtn = null!, _addBtn = null!, _lyricsBtn = null!, _artistBtn = null!;
+    private FontIcon _playIcon = null!, _repeatIcon = null!;
     private ToggleButton _shuffleBtn = null!, _likeBtn = null!;
-    private HyperlinkButton _lyricsBtn = null!, _artistBtn = null!;
     private bool _suppressLike;
 
     // Connect picker

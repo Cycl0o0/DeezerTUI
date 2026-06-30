@@ -241,6 +241,7 @@ private:
     QSlider     *m_seek = nullptr, *m_vol = nullptr;
     QLabel      *m_nowPlaying = nullptr, *m_cover = nullptr,
                 *m_posLabel = nullptr, *m_durLabel = nullptr;
+    QLabel      *m_explicitBadge = nullptr;  // styled "E" tag shown for explicit tracks
     QTimer      *m_poll = nullptr;
 
     // ---- data ----

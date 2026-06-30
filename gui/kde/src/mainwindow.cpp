@@ -956,28 +956,58 @@ QWidget *MainWindow::buildTransport() {
     m_cover->setPixmap(placeholderPix(56));
     h->addWidget(m_cover);
 
+    // Small "E" badge — visible only when the current track is flagged explicit.
+    m_explicitBadge = new QLabel(QStringLiteral("E"));
+    m_explicitBadge->setStyleSheet(
+        "QLabel{background:#666666;color:#FFFFFF;border-radius:3px;"
+        "padding:0px 3px;font-size:10px;font-weight:bold;}");
+    m_explicitBadge->setAlignment(Qt::AlignCenter);
+    m_explicitBadge->setFixedHeight(16);
+    m_explicitBadge->setVisible(false);
+    h->addWidget(m_explicitBadge);
+
     m_nowPlaying = new QLabel("Not playing");
     m_nowPlaying->setMinimumWidth(180);
     h->addWidget(m_nowPlaying, 0);
 
     // Lyrics / Artist detail for the current track, sitting next to its title.
     auto *lyricsBtn = new QToolButton;
-    lyricsBtn->setText(QStringLiteral("Lyrics"));
+    {
+        QIcon ico = QIcon::fromTheme(QStringLiteral("view-media-lyrics"));
+        if (ico.isNull())
+            ico = QIcon::fromTheme(QStringLiteral("view-media-lyrics-symbolic"));
+        if (ico.isNull())
+            ico = QIcon::fromTheme(QStringLiteral("text-x-generic"));
+        lyricsBtn->setIcon(ico);
+    }
+    lyricsBtn->setText(QString());
+    lyricsBtn->setIconSize(QSize(22, 22));
     lyricsBtn->setAutoRaise(true);
-    lyricsBtn->setToolTip(QStringLiteral("Show lyrics for the current track"));
+    lyricsBtn->setToolTip(QStringLiteral("Lyrics"));
     connect(lyricsBtn, &QToolButton::clicked, this, &MainWindow::openLyrics);
     h->addWidget(lyricsBtn);
 
     auto *artistBtn = new QToolButton;
-    artistBtn->setText(QStringLiteral("Artist"));
+    {
+        QIcon ico = QIcon::fromTheme(QStringLiteral("view-media-artist"));
+        if (ico.isNull())
+            ico = QIcon::fromTheme(QStringLiteral("im-user"));
+        if (ico.isNull())
+            ico = QIcon::fromTheme(QStringLiteral("user"));
+        artistBtn->setIcon(ico);
+    }
+    artistBtn->setText(QString());
+    artistBtn->setIconSize(QSize(22, 22));
     artistBtn->setAutoRaise(true);
-    artistBtn->setToolTip(QStringLiteral("Open the current track's artist"));
+    artistBtn->setToolTip(QStringLiteral("Artist"));
     connect(artistBtn, &QToolButton::clicked, this, &MainWindow::openArtistForCurrent);
     h->addWidget(artistBtn);
 
     // Heart toggle: like/unlike the current track (DZAddFavorite/DZRemoveFavorite).
     m_likeBtn = new QToolButton;
     m_likeBtn->setAutoRaise(true);
+    m_likeBtn->setCheckable(true);
+    m_likeBtn->setIconSize(QSize(22, 22));
     connect(m_likeBtn, &QToolButton::clicked, this, &MainWindow::toggleLikeCurrent);
     setLikeButton(false);
     h->addWidget(m_likeBtn);
@@ -1013,9 +1043,12 @@ QWidget *MainWindow::buildTransport() {
     });
 
     m_shuffleBtn = new QToolButton;
-    m_shuffleBtn->setText("Shuffle");
+    m_shuffleBtn->setIcon(QIcon::fromTheme(QStringLiteral("media-playlist-shuffle")));
+    m_shuffleBtn->setText(QString());
+    m_shuffleBtn->setIconSize(QSize(22, 22));
     m_shuffleBtn->setCheckable(true);
     m_shuffleBtn->setAutoRaise(true);
+    m_shuffleBtn->setToolTip(QStringLiteral("Shuffle"));
     connect(m_shuffleBtn, &QToolButton::toggled, this, [this](bool on) {
         m_shuffle = on;
         DZSetShuffle(on ? 1 : 0);
@@ -1023,26 +1056,48 @@ QWidget *MainWindow::buildTransport() {
     h->addWidget(m_shuffleBtn);
 
     m_repeatBtn = new QToolButton;
-    m_repeatBtn->setText("Repeat: Off");
+    m_repeatBtn->setIcon(QIcon::fromTheme(QStringLiteral("media-playlist-repeat")));
+    m_repeatBtn->setText(QString());
+    m_repeatBtn->setIconSize(QSize(22, 22));
+    m_repeatBtn->setCheckable(true);
+    m_repeatBtn->setChecked(false);
     m_repeatBtn->setAutoRaise(true);
+    m_repeatBtn->setToolTip(QStringLiteral("Repeat: off"));
     connect(m_repeatBtn, &QToolButton::clicked, this, [this] {
         m_repeat = (m_repeat + 1) % 3;
-        m_repeatBtn->setText(m_repeat == 0 ? "Repeat: Off"
-                             : m_repeat == 1 ? "Repeat: All"
-                                             : "Repeat: One");
+        m_repeatBtn->setIcon(QIcon::fromTheme(
+            m_repeat == 2 ? QStringLiteral("media-playlist-repeat-song")
+                          : QStringLiteral("media-playlist-repeat")));
+        m_repeatBtn->setChecked(m_repeat != 0);
+        m_repeatBtn->setToolTip(m_repeat == 0 ? QStringLiteral("Repeat: off")
+                                : m_repeat == 1 ? QStringLiteral("Repeat: all")
+                                                : QStringLiteral("Repeat: one"));
         DZSetRepeat(m_repeat);
     });
     h->addWidget(m_repeatBtn);
 
     // OpenDeezer Connect: cast playback to another OpenDeezer device on the LAN.
     m_connectBtn = new QToolButton;
-    m_connectBtn->setText(QString::fromUtf8("\xF0\x9F\x93\xA1")); // 📡
+    {
+        QIcon ico = QIcon::fromTheme(QStringLiteral("network-wireless"));
+        if (ico.isNull())
+            ico = QIcon::fromTheme(QStringLiteral("video-display"));
+        m_connectBtn->setIcon(ico);
+    }
+    m_connectBtn->setText(QString());
+    m_connectBtn->setIconSize(QSize(22, 22));
     m_connectBtn->setAutoRaise(true);
     m_connectBtn->setToolTip(QStringLiteral("Connect to a device"));
     connect(m_connectBtn, &QToolButton::clicked, this, &MainWindow::openConnectPicker);
     h->addWidget(m_connectBtn);
 
-    h->addWidget(new QLabel("Vol"));
+    {
+        auto *volLabel = new QLabel;
+        volLabel->setPixmap(
+            QIcon::fromTheme(QStringLiteral("audio-volume-high")).pixmap(16, 16));
+        volLabel->setToolTip(QStringLiteral("Volume"));
+        h->addWidget(volLabel);
+    }
     m_vol = new QSlider(Qt::Horizontal);
     m_vol->setRange(0, 100);
     m_vol->setValue(100);
@@ -1061,6 +1116,7 @@ QWidget *MainWindow::buildTransport() {
     m_playBtn->setStyleSheet(QString("QToolButton{color:%1;}").arg(kAccent));
     const QString toggleQss = QString("QToolButton:checked{color:%1;font-weight:bold;}").arg(kAccent);
     m_shuffleBtn->setStyleSheet(toggleQss);
+    m_repeatBtn->setStyleSheet(toggleQss);
     return bar;
 }
 
@@ -1444,12 +1500,18 @@ void MainWindow::runSearch() {
 
 // ---- favourites (like / unlike) -------------------------------------------
 
-// Paint the heart for the given liked state.
+// Paint the like button for the given liked state.
 void MainWindow::setLikeButton(bool liked) {
     if (!m_likeBtn)
         return;
-    m_likeBtn->setText(liked ? QString::fromUtf8("♥")   // ♥ filled
-                             : QString::fromUtf8("♡"));  // ♡ outline
+    QIcon icon = QIcon::fromTheme(QStringLiteral("emblem-favorite"));
+    if (icon.isNull())
+        icon = QIcon::fromTheme(QStringLiteral("emblem-favorite-symbolic"));
+    if (icon.isNull())
+        icon = QIcon::fromTheme(QStringLiteral("starred"));
+    m_likeBtn->setIcon(icon);
+    m_likeBtn->setText(QString());
+    m_likeBtn->setChecked(liked);
     m_likeBtn->setStyleSheet(liked ? QString("QToolButton{color:%1;}").arg(kAccent)
                                    : QString());
     m_likeBtn->setToolTip(liked ? QStringLiteral("Remove from Liked Songs")
@@ -2434,7 +2496,9 @@ void MainWindow::playCurrent() {
 }
 
 void MainWindow::setNowPlaying(const Track &t) {
-    m_nowPlaying->setText(badgedTitle(t) + "\n" + t.artistLine);
+    if (m_explicitBadge)
+        m_explicitBadge->setVisible(t.isExplicit);
+    m_nowPlaying->setText(t.name + "\n" + t.artistLine);
     m_cover->setPixmap(placeholderPix(56));
     refreshLikeButton(); // reflect liked state for the new track
 
@@ -2724,7 +2788,9 @@ void MainWindow::tick() {
                 sub += QStringLiteral("   ·   ") + QString::fromUtf8(fp);
             DZFree(fp);
         }
-        m_nowPlaying->setText(badgedTitle(m_current) + "\n" + sub);
+        if (m_explicitBadge)
+            m_explicitBadge->setVisible(m_current.isExplicit);
+        m_nowPlaying->setText(m_current.name + "\n" + sub);
     }
 
     // Lyrics page: follow the playing track and keep the synced line highlighted.

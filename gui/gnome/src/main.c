@@ -4365,6 +4365,9 @@ static GtkWidget *build_now_playing(App *a) {
   g_signal_connect(a->prev_btn, "clicked", G_CALLBACK(on_prev_clicked), a);
   g_signal_connect(a->play_btn, "clicked", G_CALLBACK(on_play_clicked), a);
   g_signal_connect(a->next_btn, "clicked", G_CALLBACK(on_next_clicked), a);
+  gtk_widget_set_tooltip_text(GTK_WIDGET(a->prev_btn), "Previous");
+  gtk_widget_set_tooltip_text(GTK_WIDGET(a->play_btn), "Play / Pause");
+  gtk_widget_set_tooltip_text(GTK_WIDGET(a->next_btn), "Next");
   gtk_box_append(GTK_BOX(bar), GTK_WIDGET(a->prev_btn));
   gtk_box_append(GTK_BOX(bar), GTK_WIDGET(a->play_btn));
   gtk_box_append(GTK_BOX(bar), GTK_WIDGET(a->next_btn));
