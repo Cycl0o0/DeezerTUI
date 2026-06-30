@@ -74,16 +74,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("create %s: %v", filename, err)
 	}
-	defer f.Close()
 
 	fmt.Printf("Downloading to %s ...\n", filename)
 
 	// DownloadTrack fetches, decrypts (BF_CBC_STRIPE) and writes the audio.
 	// This is the whole decode/download flow in one call.
 	if err := dz.DownloadTrack(plan, f); err != nil {
+		_ = f.Close()
 		log.Fatalf("download: %v", err)
 	}
+	if err := f.Close(); err != nil {
+		log.Fatalf("close %s: %v", filename, err)
+	}
 
-	info, _ := f.Stat()
-	fmt.Printf("Done. Wrote %d KB\n", info.Size()/1024)
+	if info, err := os.Stat(filename); err == nil {
+		fmt.Printf("Done. Wrote %d KB\n", info.Size()/1024)
+	}
 }

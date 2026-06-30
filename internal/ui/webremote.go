@@ -241,9 +241,7 @@ func (m *Model) webRemoteView() string {
 			"",
 		)
 		if m.webRemoteQR != "" {
-			for _, line := range strings.Split(strings.TrimRight(m.webRemoteQR, "\n"), "\n") {
-				lines = append(lines, line)
-			}
+			lines = append(lines, strings.Split(strings.TrimRight(m.webRemoteQR, "\n"), "\n")...)
 			lines = append(lines, "")
 		}
 		lines = append(lines, dim.Render("enter disable · esc back · q quit"))
