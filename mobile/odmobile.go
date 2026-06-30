@@ -745,6 +745,15 @@ func remoteSnapshot() control.State { mu.Lock(); defer mu.Unlock(); return remot
 func setRemoteState(st control.State) {
 	mu.Lock()
 	if remoteCli != nil {
+		// Remote track ended (the remote renders single tracks we send it; it has
+		// no queue of its own) -> bump finished so the app's auto-advance fires
+		// the next track, honoring repeat/shuffle. A track end shows up as
+		// playing -> stopped near the end; the position guard keeps a user stop
+		// from auto-advancing.
+		if remoteSt.State == "playing" && st.State == "stopped" &&
+			remoteSt.DurationMS > 0 && remoteSt.PositionMS >= remoteSt.DurationMS-2000 {
+			finished++
+		}
 		remoteSt = st
 	}
 	mu.Unlock()

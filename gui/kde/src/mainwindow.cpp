@@ -1429,7 +1429,12 @@ void MainWindow::finishLogin(const QByteArray &acct) {
     applyQuality(m_quality);     // apply persisted quality (+ entitlement note)
     refreshConnectButton();      // reflect any active OpenDeezer Connect device
     m_poll->start();
-    m_sidebar->setCurrentRow(0); // triggers loadHome() — Home is the default landing
+    // Qt makes the first sidebar row current when items are added (before login),
+    // so setCurrentRow(0) is a no-op here and would NOT re-fire onSidebarChanged —
+    // load Home explicitly now that the engine is authenticated (was: empty Home).
+    m_sidebar->setCurrentRow(0);
+    m_stack->setCurrentIndex(0);
+    loadHome();
     const QString conn = (m_haveAccount && !m_accountName.isEmpty())
         ? m_accountName + " · " + m_accountOffer
         : QStringLiteral("Connected");

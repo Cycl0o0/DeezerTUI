@@ -246,6 +246,16 @@ func remotePoller(rc *control.Client, stop chan struct{}) {
 			mu.Lock()
 			active := remoteCli == rc // still the active device?
 			if active {
+				// The remote renders single tracks we send it; it has no queue of
+				// its own — THIS device drives the queue. When the remote's track
+				// ends it goes playing -> stopped near the end, so bump the
+				// finished counter to fire this device's auto-advance, which then
+				// sends the next track (honoring repeat/shuffle). The position
+				// guard keeps a user-initiated mid-track stop from auto-advancing.
+				if remoteSt.State == "playing" && st.State == "stopped" &&
+					remoteSt.DurationMS > 0 && remoteSt.PositionMS >= remoteSt.DurationMS-2000 {
+					finished++
+				}
 				remoteSt = st
 			}
 			mu.Unlock()

@@ -4222,8 +4222,11 @@ static void init_done(GObject *src, GAsyncResult *res, gpointer data) {
     /* refresh (not just append) so switching accounts replaces the previous
      * account's playlists instead of stacking the new ones underneath */
     sidebar_refresh_playlists(APP);
-    /* select Home (row 0) → triggers the home discovery page load */
+    /* select Home (row 0) → triggers the home discovery page load. Unselect
+     * first so the selection actually CHANGES and on_sidebar_selected re-fires
+     * even if row 0 was already selected before login (else: empty Home). */
     GtkListBoxRow *row = gtk_list_box_get_row_at_index(APP->sidebar, 0);
+    gtk_list_box_unselect_all(APP->sidebar);
     gtk_list_box_select_row(APP->sidebar, row);
   } else if (ic && ic->persist) {
     /* login-window path: let the user retry or fall back to manual entry */
