@@ -8,8 +8,9 @@ MOD=github.com/Cycl0o0/OpenDeezer
 # compile_native_go_fuzzer rewrites each testing.F harness to use go-118-fuzz-
 # build's shim, so that package must resolve in the module. Add it here (the
 # build container is ephemeral, so this doesn't touch the committed go.mod).
+# NB: do NOT `go mod tidy` after — tidy prunes this dep (nothing in the committed
+# tree imports it; the import is injected by compile_native_go_fuzzer at build).
 go get github.com/AdamKorcz/go-118-fuzz-build/testing
-go mod tidy
 
 # --- pure-Go, security-critical custom code: the BF_CBC_STRIPE decryptor -------
 compile_native_go_fuzzer "$MOD/internal/deezer" FuzzDecryptTrack   fuzz_decrypt_track
