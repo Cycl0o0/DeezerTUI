@@ -48,7 +48,7 @@ struct PodcastsView: View {
                             PodcastCard(podcast: p) { app.openPodcast(p) }
                         }
                     }
-                    .padding(16).padding(.bottom, 100)
+                    .padding(16).padding(.bottom, 12)
                 }
             }
         }
@@ -100,7 +100,7 @@ private struct PodcastEpisodesView: View {
                             Divider().overlay(DZ.hairline).padding(.leading, 24)
                         }
                     }
-                    .padding(.bottom, 100)
+                    .padding(.bottom, 12)
                 }
             }
         }

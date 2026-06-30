@@ -18,7 +18,7 @@ struct PlaylistGridView: View {
                     }
                 }
                 .padding(16)
-                .padding(.bottom, 100)
+                .padding(.bottom, 12)
             }
         }
         .toolbar {

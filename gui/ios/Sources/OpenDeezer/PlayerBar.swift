@@ -64,6 +64,7 @@ struct NowPlayingScreen: View {
     @EnvironmentObject var app: AppState
     @State private var scrubbing = false
     @State private var scrub = 0.0
+    @State private var pendingArtist = false   // open the artist after this sheet closes
     @Environment(\.dismiss) private var dismiss
 
     private var isPlaying: Bool { app.state == .playing }
@@ -217,7 +218,13 @@ struct NowPlayingScreen: View {
                     }
                     .disabled(app.current == nil)
 
-                    Button { app.openArtistForCurrent() } label: {
+                    Button {
+                        // The artist sheet lives on the main UI (also opened from
+                        // track rows), so close now-playing first, then open it.
+                        guard app.current?.artists.first != nil else { return }
+                        pendingArtist = true
+                        dismiss()
+                    } label: {
                         VStack(spacing: 4) {
                             Image(systemName: "music.mic").font(.system(size: 22))
                             Text("Artist").font(.caption2)
@@ -238,6 +245,20 @@ struct NowPlayingScreen: View {
                 .padding(.horizontal, 28).padding(.bottom, 20)
 
                 Spacer()
+            }
+        }
+        // Lyrics + Connect are presented from here (within the now-playing sheet)
+        // so they appear over it rather than failing on a hidden ancestor.
+        .sheet(isPresented: $app.showLyrics) {
+            LyricsView().environmentObject(app)
+        }
+        .sheet(isPresented: $app.showDevicePicker) {
+            DevicePickerView().environmentObject(app)
+        }
+        .onDisappear {
+            if pendingArtist {
+                pendingArtist = false
+                app.openArtistForCurrent()
             }
         }
     }

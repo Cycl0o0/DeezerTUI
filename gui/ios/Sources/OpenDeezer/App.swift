@@ -37,11 +37,12 @@ struct RootView: View {
                 LoginGate()
             }
         }
+        // Sheets reachable from the main UI. Lyrics / Connect are presented from
+        // within NowPlayingScreen instead (a sheet can't present another sheet
+        // from an ancestor that's hidden behind the now-playing sheet).
         .sheet(isPresented: $app.showLoginWeb) { DeezerLoginSheet() }
-        .sheet(isPresented: $app.showLyrics) { LyricsView() }
         .sheet(isPresented: $app.showArtist) { ArtistView() }
         .sheet(isPresented: $app.showAddToPlaylist) { AddToPlaylistSheet() }
-        .sheet(isPresented: $app.showDevicePicker) { DevicePickerView() }
     }
 }
 
@@ -171,31 +172,29 @@ struct MainTabView: View {
     @State private var selectedTab = 0
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            TabView(selection: $selectedTab) {
-                LikedTab()
-                    .tabItem { Label("Liked", systemImage: "heart.fill") }.tag(0)
-                SearchTab()
-                    .tabItem { Label("Search", systemImage: "magnifyingglass") }.tag(1)
-                PlaylistsTab()
-                    .tabItem { Label("Playlists", systemImage: "music.note.list") }.tag(2)
-                ChartsTab()
-                    .tabItem { Label("Charts", systemImage: "chart.bar.fill") }.tag(3)
-                FlowTab()
-                    .tabItem { Label("Flow", systemImage: "infinity") }.tag(4)
-                PodcastsTab()
-                    .tabItem { Label("Podcasts", systemImage: "mic.fill") }.tag(5)
-                SettingsTab()
-                    .tabItem { Label("Settings", systemImage: "gearshape.fill") }.tag(6)
-            }
-            .tint(DZ.accent)
-
+        TabView(selection: $selectedTab) {
+            LikedTab()
+                .tabItem { Label("Liked", systemImage: "heart.fill") }.tag(0)
+            SearchTab()
+                .tabItem { Label("Search", systemImage: "magnifyingglass") }.tag(1)
+            PlaylistsTab()
+                .tabItem { Label("Playlists", systemImage: "music.note.list") }.tag(2)
+            ChartsTab()
+                .tabItem { Label("Charts", systemImage: "chart.bar.fill") }.tag(3)
+            FlowTab()
+                .tabItem { Label("Flow", systemImage: "infinity") }.tag(4)
+            PodcastsTab()
+                .tabItem { Label("Podcasts", systemImage: "mic.fill") }.tag(5)
+            SettingsTab()
+                .tabItem { Label("Settings", systemImage: "gearshape.fill") }.tag(6)
+        }
+        .tint(DZ.accent)
+        // Float the mini player above the tab bar. safeAreaInset both positions
+        // it correctly (no hardcoded tab-bar height) AND insets each tab's scroll
+        // content so the bar never covers the last rows.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             if app.current != nil {
-                VStack(spacing: 0) {
-                    MiniPlayerBar()
-                    // Spacer to clear the tab bar (safe area handled by safeAreaInset)
-                    Color.clear.frame(height: 49)
-                }
+                MiniPlayerBar().padding(.bottom, 6)
             }
         }
         .sheet(isPresented: $app.showNowPlaying) {
