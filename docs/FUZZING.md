@@ -8,7 +8,17 @@ next to the code they exercise:
 |---|---|---|
 | `FuzzDecryptTrack` | `internal/deezer` | BF_CBC_STRIPE whole-buffer decrypt; asserts length is preserved |
 | `FuzzStripeChunking` | `internal/deezer` | the stripe decryptor is independent of how input is split across `Feed()` calls |
-| `FuzzFLACDecode` | `internal/audio` | the FLAC decode path on a malformed stream (must not panic) |
+| `FuzzFLACDecode` | `internal/audio` | the FLAC decode path on a malformed stream (must not panic). **Local-only for now** — see Findings below. |
+
+## Findings
+
+- **FLAC decode OOM** (found by `FuzzFLACDecode` on its first CI run): a malformed
+  FLAC stream drives an unbounded allocation inside the `mewkiz/flac` decoder
+  (~6.6 GB), i.e. a denial-of-service for anything decoding untrusted FLAC (e.g.
+  a podcast on an off-Deezer host). `FuzzFLACDecode` is therefore kept out of the
+  continuous CI run until the allocation is bounded (a size-limited reader around
+  the stream and/or an upstream fix); the harness stays runnable locally so the
+  fix can be verified against it.
 
 ## Run locally
 
