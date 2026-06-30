@@ -92,6 +92,7 @@ private:
     // ---- UI construction ----
     void          buildMenu();
     void          buildSidebar();
+    QWidget      *buildHomePage();
     QWidget      *buildTracksPage();
     QWidget      *buildPlaylistsPage();
     QWidget      *buildSearchPage();
@@ -141,6 +142,7 @@ private:
     void promptLogin();                       // webview / manual-ARL login dialog
     void finishLogin(const QByteArray &acct); // post-login bring-up (shared path)
     void onSidebarChanged(int row);
+    void loadHome();
     void loadFavorites();
     void loadFlow();
     void loadCharts();
@@ -205,6 +207,12 @@ private:
     QLabel        *m_blockBody     = nullptr;   // its body line (carries the offer)
     QListWidget   *m_sidebar       = nullptr;
     QStackedWidget*m_stack         = nullptr;
+
+    // home page (stack index 0)
+    QLabel        *m_homeGreeting      = nullptr;
+    QListWidget   *m_homeTracksRail    = nullptr;
+    QListWidget   *m_homePlaylistsRail = nullptr;
+
     QLabel        *m_tracksHeader  = nullptr;
     QTableWidget  *m_trackTable    = nullptr;
     QListWidget   *m_playlistGrid  = nullptr;
@@ -245,6 +253,10 @@ private:
     QTimer      *m_poll = nullptr;
 
     // ---- data ----
+    // home page data
+    QVector<Track>    m_homeTracks;
+    QVector<Playlist> m_homePlaylists;
+
     QVector<Track>    m_tableTracks;    // rows currently shown in m_trackTable
     QVector<Track>    m_searchTracks;   // rows currently shown in m_searchTrackTable
     QVector<Album>    m_searchAlbums;

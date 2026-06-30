@@ -96,7 +96,9 @@ private fun MainScaffold(vm: AppViewModel) {
                 HomeScreen(
                     accountName = vm.account?.name.orEmpty(),
                     connected = playerState.connectedDevice.isNotBlank(),
+                    player = player,
                     onNavigate = { nav(it) },
+                    onPlaylist = { nav(Routes.playlist(it.id, it.name)) },
                     onCast = { showConnect = true },
                     onSettings = { nav(Routes.SETTINGS) },
                 )

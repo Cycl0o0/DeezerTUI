@@ -127,6 +127,16 @@ data class WebRemoteInfo(
     val port: Int,
 )
 
+data class HomeData(
+    val topTracks: List<Track>,
+    val topAlbums: List<Album>,
+    val playlists: List<Playlist>,
+) {
+    companion object {
+        val EMPTY = HomeData(emptyList(), emptyList(), emptyList())
+    }
+}
+
 // ---- parsing (org.json; tolerant of {"error":...} payloads) ----
 
 object Json {
@@ -313,6 +323,15 @@ object Json {
             code = o.optString("code"),
             url = o.optString("url"),
             port = o.optInt("port"),
+        )
+    }
+
+    fun home(s: String?): HomeData {
+        val o = obj(s) ?: return HomeData.EMPTY
+        return HomeData(
+            topTracks = tracksOf(o.optJSONArray("topTracks")),
+            topAlbums = albumsOf(o.optJSONArray("topAlbums")),
+            playlists = playlistsOf(o.optJSONArray("playlists")),
         )
     }
 }

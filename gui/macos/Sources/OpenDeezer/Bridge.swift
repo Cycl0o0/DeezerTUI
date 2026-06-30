@@ -79,6 +79,9 @@ enum Core {
     static func charts() -> ChartsResponse? {
         decode(ChartsResponse.self, takeJSON(DZChartsJSON()))
     }
+    static func home() -> HomeResponse? {
+        decode(HomeResponse.self, takeJSON(DZHomeJSON()))
+    }
     static func artistTop(_ id: String) -> [Track] {
         decode(TracksResponse.self, takeJSON(withC(id) { DZArtistTopJSON($0) }))?.tracks ?? []
     }

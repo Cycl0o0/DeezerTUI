@@ -3,7 +3,7 @@ import SwiftUI
 
 // Section is the sidebar selection.
 enum Section: Hashable {
-    case liked, playlists, search, charts, flow, podcasts
+    case home, liked, playlists, search, charts, flow, podcasts
 }
 
 enum RepeatMode: Int { case off, all, one }
@@ -36,7 +36,9 @@ final class AppState: ObservableObject {
     let nowPlaying = NowPlayingController()
     let tray = TrayController()
 
-    @Published var section: Section = .liked
+    @Published var section: Section = .home
+    @Published var homeData: HomeResponse?       // loaded by loadHome() / DZHomeJSON
+    @Published var homeLoading = false
     @Published var tracks: [Track] = []          // current track list / queue
     @Published var listTitle = "Liked Songs"
     @Published var listArtwork = ""              // hero artwork (empty => Liked gradient)
@@ -211,7 +213,7 @@ final class AppState: ObservableObject {
         tray.closeToTray = settings.closeToTray
         tray.attach(app: self)
         startTimer()
-        loadFavorites()
+        loadHome()
     }
 
     static func loadARL() -> String? {
@@ -260,6 +262,19 @@ final class AppState: ObservableObject {
     }
 
     // MARK: browse
+
+    // loadHome fetches the Home aggregator (DZHomeJSON) off the main thread.
+    // Best-effort: empty sections simply show nothing on the home screen.
+    func loadHome() {
+        homeLoading = true
+        Task.detached {
+            let h = Core.home()
+            await MainActor.run {
+                self.homeData = h
+                self.homeLoading = false
+            }
+        }
+    }
 
     func loadFavorites() {
         listTitle = "Liked Songs"

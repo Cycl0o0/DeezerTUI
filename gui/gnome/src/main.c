@@ -36,6 +36,10 @@
 extern void DZSetRepeat(int mode); /* 0=off 1=all 2=one; forwards to remote if connected */
 extern void DZSetShuffle(int on);  /* 0=off 1=on;        forwards to remote if connected */
 
+/* Home aggregator — returns {"topTracks":[jTrack],"topAlbums":[jAlbum],"playlists":[jPlaylist]};
+ * best-effort (empty sections are omitted); free result with DZFree. */
+extern char *DZHomeJSON(void);
+
 /* Phone web remote — off by default; toggled from the Phone Remote dialog.
  * DZWebRemoteQRPNG returns PNG bytes (free with DZFreeBytes); NULL when disabled. */
 extern void           DZWebRemoteSetEnabled(int on);
@@ -225,12 +229,19 @@ typedef struct {
   GtkButton            *shuffle_btn;    /* toggles shuffle */
   int                   repeat_mode;   /* 0=off 1=all 2=one */
   gboolean              shuffle_on;    /* shuffle is active */
+
+  /* ---- home view (Discovery Home — the default landing page after login) ---- */
+  GtkWidget            *home_box;       /* inner VBox inside the home scrolled window;
+                                         * cleared + repopulated each time Home is selected */
+  GPtrArray            *home_tracks;    /* DzTrack* owned — play queue source for the top-tracks
+                                         * horizontal rail (mirrored into track_store on play) */
+  guint                 home_gen;       /* drops stale async cover fetches on the home rail */
 } App;
 
 static App *APP; /* single window — a global keeps GTask plumbing tidy */
 
 /* sidebar row kinds */
-enum { ROW_LIKED = 0, ROW_PLAYLIST = 1, ROW_CHARTS = 2, ROW_FLOW = 3, ROW_PODCASTS = 4 };
+enum { ROW_HOME = 0, ROW_LIKED = 1, ROW_PLAYLIST = 2, ROW_CHARTS = 3, ROW_FLOW = 4, ROW_PODCASTS = 5 };
 
 /* browse kinds */
 typedef enum { LOAD_FAVORITES, LOAD_PLAYLIST, LOAD_ALBUM, LOAD_SEARCH, LOAD_CHARTS, LOAD_FLOW } LoadKind;
@@ -246,6 +257,10 @@ static void start_cover_fetch(App *a, const char *url);
 static void load_async(App *a, LoadKind kind, const char *arg);
 static void load_playlists_async(App *a);
 static void toast(App *a, const char *msg);
+
+/* home view (defined after browse view section) */
+static void load_home_async(App *a);
+static void show_home(App *a);
 
 /* v0.4 wiring (defined in later sections) */
 static void update_now_playing_ui(App *a, DzTrack *t, int idx);
@@ -605,7 +620,9 @@ static void on_sidebar_selected(GtkListBox *box, GtkListBoxRow *row, gpointer da
   const char *id = g_object_get_data(G_OBJECT(row), "id");
   const char *title = g_object_get_data(G_OBJECT(row), "title");
   adw_navigation_page_set_title(a->content_page, title ? title : "");
-  if (kind == ROW_PLAYLIST)
+  if (kind == ROW_HOME)
+    load_home_async(a);
+  else if (kind == ROW_PLAYLIST)
     load_async(a, LOAD_PLAYLIST, id);
   else if (kind == ROW_CHARTS)
     load_async(a, LOAD_CHARTS, NULL);
@@ -3144,6 +3161,297 @@ static GtkWidget *build_browse_view(App *a) {
 }
 
 /* ---------------------------------------------------------------------------
+ * home view: Discovery Home — time-based greeting, quick-pick destination
+ * buttons, a horizontal top-tracks rail, and a horizontal playlists rail.
+ *
+ * The whole page sits inside a vertical GtkScrolledWindow so all sections are
+ * reachable on small screens. Data is loaded from DZHomeJSON on a worker thread
+ * and marshalled back to the main loop, exactly like the browse/charts paths.
+ * Cover images are fetched per card via the existing fetch_picture helper.
+ * Clicking a track card plays it (via play_index) without navigating away from
+ * the home view. Clicking a playlist card opens it via load_async LOAD_PLAYLIST
+ * (the same path used by sidebar playlist rows and the browse playlist list).
+ * ------------------------------------------------------------------------- */
+
+static const char *greeting_for_hour(void) {
+  GDateTime *dt = g_date_time_new_now_local();
+  int hour = g_date_time_get_hour(dt);
+  g_date_time_unref(dt);
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
+/* ---- quick-pick cards: navigate to an existing sidebar destination ---- */
+
+static void on_home_quickpick_clicked(GtkButton *b, gpointer data) {
+  App *a = data;
+  int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "sidebar_row"));
+  GtkListBoxRow *row = gtk_list_box_get_row_at_index(a->sidebar, idx);
+  if (row) gtk_list_box_select_row(a->sidebar, row);
+}
+
+static GtkWidget *make_quickpick_btn(App *a, const char *label, const char *icon,
+                                     int sidebar_idx) {
+  GtkWidget *btn = gtk_button_new();
+  gtk_widget_add_css_class(btn, "flat");
+  GtkWidget *inner = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_margin_start(inner, 6);
+  gtk_widget_set_margin_end(inner, 6);
+  gtk_widget_set_margin_top(inner, 4);
+  gtk_widget_set_margin_bottom(inner, 4);
+  gtk_box_append(GTK_BOX(inner), gtk_image_new_from_icon_name(icon));
+  GtkWidget *lbl = gtk_label_new(label);
+  gtk_widget_add_css_class(lbl, "heading");
+  gtk_box_append(GTK_BOX(inner), lbl);
+  gtk_button_set_child(GTK_BUTTON(btn), inner);
+  g_object_set_data(G_OBJECT(btn), "sidebar_row", GINT_TO_POINTER(sidebar_idx));
+  g_signal_connect(btn, "clicked", G_CALLBACK(on_home_quickpick_clicked), a);
+  return btn;
+}
+
+/* ---- top-tracks rail ---- */
+
+static void on_home_track_clicked(GtkButton *b, gpointer data) {
+  App *a = data;
+  int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "home_track_idx"));
+  if (!a->home_tracks || idx < 0 || (guint)idx >= a->home_tracks->len) return;
+  /* mirror home top-tracks into the main queue so next/prev work; then play */
+  g_list_store_remove_all(a->track_store);
+  for (guint i = 0; i < a->home_tracks->len; i++)
+    g_list_store_append(a->track_store, g_ptr_array_index(a->home_tracks, i));
+  a->current_index = -1;
+  play_index(a, idx);
+  /* stay on the home view — the now-playing bar reflects the playing track */
+}
+
+static GtkWidget *make_home_track_card(App *a, DzTrack *t, int idx, guint gen) {
+  GtkWidget *btn = gtk_button_new();
+  gtk_widget_add_css_class(btn, "flat");
+  g_object_set_data(G_OBJECT(btn), "home_track_idx", GINT_TO_POINTER(idx));
+  g_signal_connect(btn, "clicked", G_CALLBACK(on_home_track_clicked), a);
+
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_set_margin_start(box, 6);
+  gtk_widget_set_margin_end(box, 6);
+  gtk_widget_set_margin_top(box, 6);
+  gtk_widget_set_margin_bottom(box, 6);
+
+  GtkWidget *pic_w = thumb_new(96, FALSE);
+  fetch_picture(GTK_PICTURE(pic_w), t->artwork, &a->home_gen, gen);
+  gtk_box_append(GTK_BOX(box), pic_w);
+
+  GtkWidget *name_lbl = gtk_label_new(t->name);
+  gtk_label_set_xalign(GTK_LABEL(name_lbl), 0.0);
+  gtk_label_set_ellipsize(GTK_LABEL(name_lbl), PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars(GTK_LABEL(name_lbl), 13);
+  gtk_widget_add_css_class(name_lbl, "heading");
+  gtk_box_append(GTK_BOX(box), name_lbl);
+
+  GtkWidget *art_lbl = gtk_label_new(t->artist);
+  gtk_label_set_xalign(GTK_LABEL(art_lbl), 0.0);
+  gtk_label_set_ellipsize(GTK_LABEL(art_lbl), PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars(GTK_LABEL(art_lbl), 13);
+  gtk_widget_add_css_class(art_lbl, "dim-label");
+  gtk_box_append(GTK_BOX(box), art_lbl);
+
+  gtk_button_set_child(GTK_BUTTON(btn), box);
+  return btn;
+}
+
+/* ---- playlists rail ---- */
+
+static void on_home_playlist_clicked(GtkButton *b, gpointer data) {
+  App *a = data;
+  const char *id   = g_object_get_data(G_OBJECT(b), "pl_id");
+  const char *name = g_object_get_data(G_OBJECT(b), "pl_name");
+  if (!id || !*id) return;
+  adw_navigation_page_set_title(a->content_page, (name && *name) ? name : "Playlist");
+  /* clear sidebar selection so clicking Home later re-selects + reloads it */
+  gtk_list_box_select_row(a->sidebar, NULL);
+  load_async(a, LOAD_PLAYLIST, id);
+}
+
+static GtkWidget *make_home_playlist_card(App *a, JsonObject *po, guint gen) {
+  char *id  = jstr(po, "id");
+  char *name = jstr(po, "name");
+  char *art  = jstr(po, "artworkUrl");
+  gint64 cnt = jint(po, "trackCount");
+
+  GtkWidget *btn = gtk_button_new();
+  gtk_widget_add_css_class(btn, "flat");
+  /* transfer ownership of id / name to object-data so they are freed with the widget */
+  g_object_set_data_full(G_OBJECT(btn), "pl_id",   id,   g_free);
+  g_object_set_data_full(G_OBJECT(btn), "pl_name", name, g_free);
+  g_signal_connect(btn, "clicked", G_CALLBACK(on_home_playlist_clicked), a);
+
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_set_margin_start(box, 6);
+  gtk_widget_set_margin_end(box, 6);
+  gtk_widget_set_margin_top(box, 6);
+  gtk_widget_set_margin_bottom(box, 6);
+
+  GtkWidget *pic_w = thumb_new(96, FALSE);
+  fetch_picture(GTK_PICTURE(pic_w), art, &a->home_gen, gen);
+  gtk_box_append(GTK_BOX(box), pic_w);
+
+  GtkWidget *name_lbl = gtk_label_new(name);
+  gtk_label_set_xalign(GTK_LABEL(name_lbl), 0.0);
+  gtk_label_set_ellipsize(GTK_LABEL(name_lbl), PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars(GTK_LABEL(name_lbl), 13);
+  gtk_widget_add_css_class(name_lbl, "heading");
+  gtk_box_append(GTK_BOX(box), name_lbl);
+
+  if (cnt > 0) {
+    char *cnt_s = g_strdup_printf("%lld tracks", (long long)cnt);
+    GtkWidget *cnt_lbl = gtk_label_new(cnt_s);
+    g_free(cnt_s);
+    gtk_label_set_xalign(GTK_LABEL(cnt_lbl), 0.0);
+    gtk_widget_add_css_class(cnt_lbl, "dim-label");
+    gtk_box_append(GTK_BOX(box), cnt_lbl);
+  }
+
+  gtk_button_set_child(GTK_BUTTON(btn), box);
+  g_free(art); /* id + name are owned by the widget's object-data */
+  return btn;
+}
+
+/* ---- populate + async loader ---- */
+
+/* Build the greeting + quick-picks + rails into a->home_box from the JSON
+ * returned by DZHomeJSON.  Always called on the main loop. */
+static void home_populate(App *a, const char *json) {
+  if (!a->home_box) return;
+  box_clear(a->home_box);
+  if (a->home_tracks) g_ptr_array_set_size(a->home_tracks, 0);
+  a->home_gen++;             /* invalidate in-flight cover fetches from the prior load */
+  guint gen = a->home_gen;
+
+  /* ---- greeting ---- */
+  GtkWidget *greet = gtk_label_new(greeting_for_hour());
+  gtk_label_set_xalign(GTK_LABEL(greet), 0.0);
+  gtk_widget_add_css_class(greet, "title-1");
+  gtk_widget_set_margin_bottom(greet, 4);
+  gtk_box_append(GTK_BOX(a->home_box), greet);
+
+  /* ---- quick picks ---- */
+  gtk_box_append(GTK_BOX(a->home_box), section_title("Quick Picks"));
+  GtkWidget *qp_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_margin_bottom(qp_box, 4);
+  /* sidebar indices: Home=0, Liked=1, Flow=2, Charts=3, Podcasts=4 */
+  struct { const char *label; const char *icon; int row; } picks[] = {
+    { "Liked Songs", "emblem-favorite-symbolic",        1 },
+    { "Flow",        "media-playlist-shuffle-symbolic",  2 },
+    { "Charts",      "view-sort-descending-symbolic",    3 },
+    { "Podcasts",    "audio-x-generic-symbolic",         4 },
+  };
+  for (guint i = 0; i < G_N_ELEMENTS(picks); i++)
+    gtk_box_append(GTK_BOX(qp_box),
+                   make_quickpick_btn(a, picks[i].label, picks[i].icon, picks[i].row));
+  gtk_box_append(GTK_BOX(a->home_box), qp_box);
+
+  /* parse the payload (best-effort: empty sections are silently skipped) */
+  if (!json) return;
+  JsonParser *p = json_parser_new();
+  if (!json_parser_load_from_data(p, json, -1, NULL)) { g_object_unref(p); return; }
+  JsonNode *root = json_parser_get_root(p);
+  JsonObject *o = (root && JSON_NODE_HOLDS_OBJECT(root)) ? json_node_get_object(root) : NULL;
+
+  /* ---- top tracks horizontal rail ---- */
+  JsonArray *tracks = (o && json_object_has_member(o, "topTracks"))
+                          ? json_object_get_array_member(o, "topTracks") : NULL;
+  guint tn = tracks ? json_array_get_length(tracks) : 0;
+  if (tn > 0) {
+    gtk_box_append(GTK_BOX(a->home_box), section_title("Top Tracks"));
+    GtkWidget *rail_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(rail_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+    GtkWidget *rail = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_start(rail, 4);
+    gtk_widget_set_margin_end(rail, 4);
+    gtk_widget_set_margin_top(rail, 4);
+    gtk_widget_set_margin_bottom(rail, 8);
+    for (guint i = 0; i < tn; i++) {
+      DzTrack *t = dz_track_from_json(json_array_get_object_element(tracks, i));
+      g_ptr_array_add(a->home_tracks, t); /* GPtrArray takes the owning ref */
+      GtkWidget *card = make_home_track_card(a, t, (int)i, gen);
+      gtk_box_append(GTK_BOX(rail), card);
+    }
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(rail_scroll), rail);
+    gtk_box_append(GTK_BOX(a->home_box), rail_scroll);
+  }
+
+  /* ---- playlists horizontal rail ---- */
+  JsonArray *pls = (o && json_object_has_member(o, "playlists"))
+                       ? json_object_get_array_member(o, "playlists") : NULL;
+  guint pn = pls ? json_array_get_length(pls) : 0;
+  if (pn > 0) {
+    gtk_box_append(GTK_BOX(a->home_box), section_title("Your Playlists"));
+    GtkWidget *pl_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(pl_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+    GtkWidget *pl_rail = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_start(pl_rail, 4);
+    gtk_widget_set_margin_end(pl_rail, 4);
+    gtk_widget_set_margin_top(pl_rail, 4);
+    gtk_widget_set_margin_bottom(pl_rail, 8);
+    for (guint i = 0; i < pn; i++) {
+      GtkWidget *card = make_home_playlist_card(
+          a, json_array_get_object_element(pls, i), gen);
+      gtk_box_append(GTK_BOX(pl_rail), card);
+    }
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(pl_scroll), pl_rail);
+    gtk_box_append(GTK_BOX(a->home_box), pl_scroll);
+  }
+
+  g_object_unref(p);
+}
+
+static void home_worker(GTask *task, gpointer src, gpointer data, GCancellable *c) {
+  (void)src; (void)data; (void)c;
+  char *j = DZHomeJSON();
+  char *dup = g_strdup(j ? j : "{}");
+  if (j) DZFree(j);
+  g_task_return_pointer(task, dup, g_free);
+}
+
+static void home_done(GObject *src, GAsyncResult *res, gpointer data) {
+  (void)src; (void)data;
+  char *json = g_task_propagate_pointer(G_TASK(res), NULL);
+  home_populate(APP, json);
+  show_home(APP);
+  g_free(json);
+}
+
+static void load_home_async(App *a) {
+  (void)a;
+  GTask *t = g_task_new(NULL, NULL, home_done, NULL);
+  g_task_run_in_thread(t, home_worker);
+  g_object_unref(t);
+}
+
+static void show_home(App *a) {
+  if (a->content_stack) gtk_stack_set_visible_child_name(a->content_stack, "home");
+}
+
+/* build_home_view: create the scrolled window + inner box (called once in
+ * on_activate; content is rebuilt by home_populate on every Home navigation). */
+static GtkWidget *build_home_view(App *a) {
+  a->home_tracks = g_ptr_array_new_with_free_func(g_object_unref);
+  GtkWidget *scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                 GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_widget_set_vexpand(scroll, TRUE);
+  a->home_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_margin_top(a->home_box, 16);
+  gtk_widget_set_margin_bottom(a->home_box, 24);
+  gtk_widget_set_margin_start(a->home_box, 16);
+  gtk_widget_set_margin_end(a->home_box, 16);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), a->home_box);
+  return scroll;
+}
+
+/* ---------------------------------------------------------------------------
  * podcasts (an AdwDialog): search shows -> open a show -> play an episode.
  * Episodes use the plain-stream path (DZPlayEpisode); they are not part of the
  * track queue, so a flag suppresses the natural-finish auto-advance for them.
@@ -3914,7 +4222,7 @@ static void init_done(GObject *src, GAsyncResult *res, gpointer data) {
     /* refresh (not just append) so switching accounts replaces the previous
      * account's playlists instead of stacking the new ones underneath */
     sidebar_refresh_playlists(APP);
-    /* select Liked Songs (row 0) → triggers the favorites load */
+    /* select Home (row 0) → triggers the home discovery page load */
     GtkListBoxRow *row = gtk_list_box_get_row_at_index(APP->sidebar, 0);
     gtk_list_box_select_row(APP->sidebar, row);
   } else if (ic && ic->persist) {
@@ -4436,7 +4744,10 @@ static GtkWidget *build_sidebar(App *a) {
   gtk_widget_add_css_class(GTK_WIDGET(a->sidebar), "navigation-sidebar");
   g_signal_connect(a->sidebar, "row-selected", G_CALLBACK(on_sidebar_selected), a);
 
-  /* static entries; the user's playlists are appended after login */
+  /* static entries; the user's playlists are appended after login.
+   * Home is row 0 — the default landing page; keep it first. */
+  gtk_list_box_append(a->sidebar,
+      make_side_row("Home", "Your daily mix", "go-home-symbolic", ROW_HOME, ""));
   gtk_list_box_append(a->sidebar,
       make_side_row("Liked Songs", "Your favorites", "emblem-favorite-symbolic", ROW_LIKED, ""));
   gtk_list_box_append(a->sidebar,
@@ -4588,17 +4899,18 @@ static void on_activate(GApplication *app, gpointer data) {
   g_signal_connect(search_text, "activate", G_CALLBACK(on_search_activate), a);
   adw_header_bar_set_title_widget(ADW_HEADER_BAR(content_hb), search);
   adw_toolbar_view_add_top_bar(content_tv, content_hb);
-  /* content stack: the track table (queue) OR the sectioned browse view */
+  /* content stack: home discovery page, track table (queue), or sectioned browse view */
   GtkWidget *stack = gtk_stack_new();
   a->content_stack = GTK_STACK(stack);
-  gtk_stack_add_named(GTK_STACK(stack), build_track_view(a), "tracks");
+  gtk_stack_add_named(GTK_STACK(stack), build_home_view(a),   "home");
+  gtk_stack_add_named(GTK_STACK(stack), build_track_view(a),  "tracks");
   gtk_stack_add_named(GTK_STACK(stack), build_browse_view(a), "browse");
   adw_toolbar_view_set_content(content_tv, stack);
   adw_toolbar_view_add_bottom_bar(content_tv, build_now_playing(a));
 
   a->toast = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
   adw_toast_overlay_set_child(a->toast, GTK_WIDGET(content_tv));
-  a->content_page = adw_navigation_page_new(GTK_WIDGET(a->toast), "Liked Songs");
+  a->content_page = adw_navigation_page_new(GTK_WIDGET(a->toast), "Home");
 
   /* ---- split ---- */
   AdwNavigationSplitView *split = ADW_NAVIGATION_SPLIT_VIEW(adw_navigation_split_view_new());

@@ -100,6 +100,9 @@ internal static class DeezerCore
     [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr DZWebRemoteInfoJSON();
     [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr DZWebRemoteQRPNG(out int outLen);
 
+    // ---- Home aggregator -------------------------------------------------------
+    [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr DZHomeJSON();
+
     // ---- helpers -------------------------------------------------------------
     // Own a DZ*JSON / char* result, copy it (UTF-8) and release it with DZFree.
     // Mirrors the C++ TakeJson(char*).
@@ -150,4 +153,5 @@ internal static class DeezerCore
         DZFreeBytes(p);
         return data;
     }
+    internal static HomeData Home() => Wire.ParseHome(TakeJson(DZHomeJSON()));
 }

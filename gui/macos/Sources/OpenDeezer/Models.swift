@@ -140,6 +140,14 @@ struct ArtistInfo: Codable, Hashable, Identifiable {
     let nbFans: Int
 }
 
+// Home aggregator (DZHomeJSON).
+// Best-effort: any section may be empty if the engine has no data for it.
+struct HomeResponse: Codable {
+    let topTracks: [Track]
+    let topAlbums: [Album]
+    let playlists: [Playlist]
+}
+
 // Global charts (DZChartsJSON).
 struct ChartsResponse: Codable {
     let tracks: [Track]
