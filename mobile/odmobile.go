@@ -32,7 +32,7 @@ import (
 )
 
 // Version is the engine/app version.
-const Version = "1.2.0"
+const Version = "1.5.0"
 
 var (
 	mu       sync.Mutex

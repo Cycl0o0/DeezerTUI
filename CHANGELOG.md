@@ -4,6 +4,19 @@ All notable changes to OpenDeezer are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0]
+
+### Added
+- **Home screen**: the GUIs now open on a native Home page instead of going
+  straight to Liked Songs — a time-based greeting, quick-pick cards (Liked ·
+  Flow · Charts · Podcasts), a "Top Tracks" rail and a "Your Playlists" rail.
+  Backed by a new engine aggregator (`DZHomeJSON` / gomobile `Home()`).
+
+### Security
+- **Continuous fuzzing**: native Go fuzz harnesses for the BF_CBC_STRIPE decrypt
+  and FLAC decode paths, wired into CI via ClusterFuzzLite (OSS-Fuzz's engine).
+  Added `SECURITY.md` (report to security@cyclooo.fr) + `docs/FUZZING.md`.
+
 ## [1.2.0]
 
 ### Changed
