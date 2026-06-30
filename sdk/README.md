@@ -212,7 +212,12 @@ Check `Whoami.Auth` on the target device to know which credential to supply:
 
 ---
 
-## Control server
+## Remote control (server = in, client = out)
+
+The control API is also symmetric: `control.Server` hosts a controllable
+endpoint (in), `control.Client` drives one (out).
+
+### Control server (in)
 
 Host a controllable endpoint that phones, AI agents, or other OpenDeezer
 clients can drive.
@@ -258,13 +263,14 @@ code := srv.EnablePairing() // display this 6-digit code to the user
 fmt.Printf("Open http://192.168.1.X:7654/remote — code: %s\n", code)
 ```
 
-### Control client
+### Control client (out)
 
 ```go
 c := control.NewClient("http://192.168.1.5:7654", "my-secret-token", "")
 st, _ := c.Status()
 fmt.Println(st.State, st.Track.Title)
 c.SetVolume(0.8)
+c.SeekMS(30000)
 c.PlayTrack("3135556")
 ```
 
@@ -306,12 +312,13 @@ p.Preload(nextPlan, nextTrack.DurationMS)
 
 Runnable examples are in [`examples/`](../examples/):
 
-| Directory | What it shows |
-|---|---|
-| `examples/search` | Login + search + print results |
-| `examples/download` | Login → PrepareStream → DownloadTrack → file |
-| `examples/connect` | Discover LAN devices + send PlayPause |
-| `examples/remote-server` | Host a control server + poll it via the client |
+| Directory | Direction | What it shows |
+|---|---|---|
+| `examples/search` | — | Login + search + print results |
+| `examples/download` | — | Login → PrepareStream → DownloadTrack → file |
+| `examples/connect` | out | Discover LAN devices + send PlayPause |
+| `examples/host` | in | Be a discoverable, controllable Connect device |
+| `examples/remote-server` | in | Host a control server + poll it via the client |
 
 Run any example with:
 
@@ -319,5 +326,6 @@ Run any example with:
 DEEZER_ARL=<your_arl> go run ./examples/search "Daft Punk"
 DEEZER_ARL=<your_arl> go run ./examples/download 3135556
 DEEZER_ARL=<your_arl> go run ./examples/connect
+DEEZER_ARL=<your_arl> go run ./examples/host
 DEEZER_ARL=<your_arl> go run ./examples/remote-server
 ```
