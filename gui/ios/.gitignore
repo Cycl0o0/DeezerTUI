@@ -1,0 +1,9 @@
+*.xcodeproj/
+*.xcworkspace/
+build/
+Odmobile.xcframework/
+.DS_Store
+xcuserdata/
+*.xccheckout
+*.moved-aside
+DerivedData/

@@ -21,6 +21,7 @@ playback). Seven native front-ends sit on top of it. By **Cycl0o0**.
 | **KDE** | Qt6 Widgets · Breeze | x86_64 · aarch64 `gui/kde` |
 | **Windows** | WinUI 3 · C# / .NET 8 · Fluent | x64 `gui/windows` |
 | **Android** | Kotlin · Jetpack Compose | arm64/arm/x86_64 (gomobile AAR) `gui/android` |
+| **iOS** | SwiftUI | iPhone (gomobile xcframework) `gui/ios` |
 
 The **unified Linux** client is a single `opendeezer` command that picks the
 native toolkit for your desktop (Qt/Breeze on KDE-family, GTK4/libadwaita
@@ -101,6 +102,9 @@ access to your account.
   runtime (preinstalled on Windows 11) for the login web view.
 - **Android**: Android 7.0+ (API 24). Building needs JDK 17, the Android SDK +
   NDK, and gomobile.
+- **iOS**: iOS 16+. Building needs Xcode, gomobile, and xcodegen (`gui/ios/build.sh`).
+  Releases ship an **unsigned** `.ipa` — sideload it with AltStore/Sideloadly, or
+  open the Xcode project, set your own Team under Signing, and run.
 - TUI album art needs a 256-color or truecolor terminal.
 
 ## TUI controls
@@ -122,6 +126,32 @@ access to your account.
 
 Home screen entries: Liked Songs · My Playlists · ⚡ Flow · 📈 Charts ·
 🎙 Podcasts · 🔍 Search (and ▶ Resume when a saved position exists).
+
+## Use it as a Go library (SDK)
+
+The engine is also a public Go SDK, so you can build your own tools on top of it —
+the Deezer API, track decode/download, OpenDeezer Connect, and the remote control.
+
+```sh
+go get github.com/Cycl0o0/OpenDeezer
+```
+
+```go
+import dz "github.com/Cycl0o0/OpenDeezer/sdk/deezer"
+
+client := dz.New(os.Getenv("DEEZER_ARL"))
+client.Login()
+client.SetQuality(dz.QualityHigh)
+
+plan, _ := client.PrepareStream("3135556")   // resolve + key the stream
+f, _ := os.Create("track.mp3")
+dz.DownloadTrack(plan, f)                     // fetch CDN, Blowfish-decrypt, write
+```
+
+Packages: `sdk/deezer` (API + decode/download), `sdk/connect` (LAN discovery +
+drive another device), `sdk/control` (host/drive the control API + phone web
+remote), `sdk/player` (in-process playback, cgo). Runnable examples in
+[`examples/`](examples); full docs in [`sdk/README.md`](sdk/README.md).
 
 ## Remote control & automation (Control API)
 
