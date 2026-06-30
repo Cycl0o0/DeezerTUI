@@ -4,6 +4,22 @@ All notable changes to OpenDeezer are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0]
+
+### Changed
+- **Native player bars**: the now-playing/transport bars now feel like real
+  native audio players — native platform icons instead of text/emoji, with
+  tooltips.
+  - **KDE**: Breeze theme icons throughout (like → `emblem-favorite`, lyrics/
+    artist/shuffle as icons, "Repeat: Off/All/One" text → a stateful repeat icon,
+    📡 → `network-wireless`, "Vol" → a volume icon), and the explicit emoji → a
+    small "E" badge.
+  - **Windows**: a Groove-Music-style transport — cover + title/artist on the
+    left, the controls centred with play/pause as a filled accent circle and the
+    seek bar + times directly under it, and lyrics/artist/connect/volume on the
+    right (Repeat/Lyrics/Artist now Segoe Fluent icons).
+  - **GNOME**: already native; added the missing transport tooltips.
+
 ## [1.0.2]
 
 ### Added
