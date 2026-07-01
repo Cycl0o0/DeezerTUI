@@ -4,6 +4,30 @@ All notable changes to OpenDeezer are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1]
+
+### Added
+- **iOS app** (8th client): a native SwiftUI iPhone app — Apple-Music-style, with
+  **Liquid Glass** (iOS 26, material fallback below), lock-screen controls, Home,
+  browse/search, Connect and the phone remote. Built via a gomobile xcframework.
+- **Update check**: every client checks GitHub for a newer release on launch and
+  shows a dismissible "update available" notice + a "Check for updates" action.
+  It only notifies and links the download — never installs anything.
+- **Remote control in Settings**: the control API / phone remote is now editable
+  in each desktop client's Settings (enable, LAN, token), on top of the env vars
+  / config files. New engine API `DZControlConfigJSON` / `DZSetControlConfig`.
+
+### Changed
+- Reworded UI copy across all clients to be terser and more native (fewer
+  marketing-y strings), and removed the "HiFi falls back to MP3" note from the
+  quality options.
+
+### Fixed
+- **Home** now loads after login on GNOME/KDE (was empty when the sidebar's first
+  row was current before sign-in).
+- **Repeat/shuffle over OpenDeezer Connect** now take effect: the controller
+  auto-advances when the remote finishes a track and applies repeat/shuffle.
+
 ## [1.5.0]
 
 ### Added
