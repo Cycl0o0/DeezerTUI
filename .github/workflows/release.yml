@@ -300,8 +300,10 @@ jobs:
       - name: Build unsigned device app
         run: |
           cd gui/ios
+          # Use an explicit generic iOS destination — '-sdk iphoneos' alone
+          # intermittently fails with "Found no destinations for the scheme".
           xcodebuild -project OpenDeezer.xcodeproj -scheme OpenDeezer \
-            -sdk iphoneos -configuration Release -derivedDataPath build \
+            -destination 'generic/platform=iOS' -configuration Release -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
       - name: Package unsigned .ipa
         run: |
