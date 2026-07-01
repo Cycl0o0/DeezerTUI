@@ -87,9 +87,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 else -> {
                     stage = AuthStage.READY
                     player.start()
+                    applyRemoteHosts()
                 }
             }
         }
+    }
+
+    /**
+     * Re-apply persisted device + audio settings once logged in. The engine holds
+     * these in memory only, so without this they reset on every relaunch. The
+     * Connect host also needs the account for same-account auth. Mirrors the iOS
+     * RemoteHostStore / AudioPrefs applyOnLaunch().
+     */
+    private fun applyRemoteHosts() {
+        if (prefs.connectHostEnabled) Engine.setConnectHostEnabled(true)
+        if (prefs.phoneRemoteEnabled) Engine.setWebRemoteEnabled(true)
+
+        if (prefs.audioQuality >= 0) Engine.setQuality(prefs.audioQuality)
+        if (prefs.replayGain >= 0) Engine.setReplayGain(prefs.replayGain == 1)
+        if (prefs.gapless >= 0) Engine.setGapless(prefs.gapless == 1)
+        if (prefs.crossfadeMs >= 0) Engine.setCrossfadeMs(prefs.crossfadeMs)
     }
 
     fun logout() {

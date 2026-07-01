@@ -21,7 +21,7 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
 )
 
-var version = "1.5.1"
+var version = "1.5.2"
 
 const protocolVersion = "2024-11-05"
 

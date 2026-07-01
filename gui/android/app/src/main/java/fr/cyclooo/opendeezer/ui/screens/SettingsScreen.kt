@@ -53,7 +53,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import fr.cyclooo.opendeezer.data.Prefs
 import fr.cyclooo.opendeezer.engine.Account
+import fr.cyclooo.opendeezer.engine.ConnectHostInfo
 import fr.cyclooo.opendeezer.engine.Engine
 import fr.cyclooo.opendeezer.engine.UpdateInfo
 import fr.cyclooo.opendeezer.engine.WebRemoteInfo
@@ -69,10 +71,17 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
     var webRemoteEnabled by remember { mutableStateOf(Engine.webRemoteInfo()?.enabled ?: false) }
     var remoteInfo by remember { mutableStateOf<WebRemoteInfo?>(null) }
     var remoteQR by remember { mutableStateOf<ByteArray?>(null) }
+    var connectHostEnabled by remember { mutableStateOf(Engine.connectHostInfo()?.enabled ?: false) }
+    var connectHostInfo by remember { mutableStateOf<ConnectHostInfo?>(null) }
     var checkingUpdate by remember { mutableStateOf(false) }
     var updateResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val prefs = remember(context) { Prefs(context) }
+
+    LaunchedEffect(connectHostEnabled) {
+        connectHostInfo = if (connectHostEnabled) Engine.connectHostInfo() else null
+    }
 
     LaunchedEffect(webRemoteEnabled) {
         if (webRemoteEnabled) {
@@ -110,6 +119,7 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
                         onClick = {
                             quality = index
                             Engine.setQuality(index)
+                            prefs.audioQuality = index
                         },
                         shape = SegmentedButtonDefaults.itemShape(index, qualityLabels.size),
                         enabled = canSelectQuality(account, index),
@@ -127,10 +137,12 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
             SettingSwitch("ReplayGain", "Normalise loudness across tracks", replayGain) {
                 replayGain = it
                 Engine.setReplayGain(it)
+                prefs.replayGain = if (it) 1 else 0
             }
             SettingSwitch("Gapless playback", "No silence between tracks", gapless) {
                 gapless = it
                 Engine.setGapless(it)
+                prefs.gapless = if (it) 1 else 0
             }
 
             HorizontalDivider()
@@ -145,9 +157,33 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
                 Slider(
                     value = crossfadeSec,
                     onValueChange = { crossfadeSec = it },
-                    onValueChangeFinished = { Engine.setCrossfadeMs((crossfadeSec * 1000).toInt()) },
+                    onValueChangeFinished = {
+                        val ms = (crossfadeSec * 1000).toInt()
+                        Engine.setCrossfadeMs(ms)
+                        prefs.crossfadeMs = ms
+                    },
                     valueRange = 0f..12f,
                     steps = 11,
+                )
+            }
+
+            HorizontalDivider()
+
+            Text("OpenDeezer Connect", style = MaterialTheme.typography.titleMedium)
+            SettingSwitch(
+                "Make this device reachable",
+                "Let your other OpenDeezer apps find and control this device",
+                connectHostEnabled,
+            ) {
+                connectHostEnabled = it
+                prefs.connectHostEnabled = it
+                Engine.setConnectHostEnabled(it)
+            }
+            connectHostInfo?.takeIf { it.enabled && it.addr.isNotBlank() }?.let { info ->
+                Text(
+                    "Reachable at ${info.addr}" + (info.name.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
@@ -160,6 +196,7 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
                 webRemoteEnabled,
             ) {
                 webRemoteEnabled = it
+                prefs.phoneRemoteEnabled = it
                 Engine.setWebRemoteEnabled(it)
             }
             if (webRemoteEnabled) {
