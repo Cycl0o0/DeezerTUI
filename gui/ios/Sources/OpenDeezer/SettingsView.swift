@@ -4,16 +4,17 @@ import UIKit
 struct SettingsView: View {
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var updates: UpdateStore
+    @StateObject private var hosts = RemoteHostStore.shared
     @Environment(\.dismiss) private var dismiss
 
-    @State private var quality = Engine.quality()
-    @State private var gapless = Engine.gapless()
-    @State private var replayGain = Engine.replayGain()
-    @State private var crossfadeMs = Double(Engine.crossfadeMS())
+    @State private var quality = AudioPrefs.quality
+    @State private var gapless = AudioPrefs.gapless
+    @State private var replayGain = AudioPrefs.replayGain
+    @State private var crossfadeMs = Double(AudioPrefs.crossfadeMs)
 
-    @State private var remoteEnabled = false
     @State private var remoteInfo: WebRemoteInfo?
     @State private var qrImage: UIImage?
+    @State private var connectInfo: ConnectHostInfo?
 
     private let qualities = [
         (0, "Normal", "MP3 · 128 kbps"),
@@ -40,6 +41,7 @@ struct SettingsView: View {
                     ForEach(qualities, id: \.0) { level, name, detail in
                         Button {
                             quality = level
+                            AudioPrefs.quality = level
                             Engine.setQuality(level)
                         } label: {
                             HStack {
@@ -58,9 +60,9 @@ struct SettingsView: View {
 
                 Section("Playback") {
                     Toggle("Gapless Playback", isOn: $gapless)
-                        .onChange(of: gapless) { _, value in Engine.setGapless(value) }
+                        .onChange(of: gapless) { _, value in AudioPrefs.gapless = value; Engine.setGapless(value) }
                     Toggle("ReplayGain", isOn: $replayGain)
-                        .onChange(of: replayGain) { _, value in Engine.setReplayGain(value) }
+                        .onChange(of: replayGain) { _, value in AudioPrefs.replayGain = value; Engine.setReplayGain(value) }
                     VStack(alignment: .leading) {
                         HStack {
                             Text("Crossfade")
@@ -70,17 +72,42 @@ struct SettingsView: View {
                         }
                         Slider(value: $crossfadeMs, in: 0...12000, step: 1000)
                             .tint(Palette.accent)
-                            .onChange(of: crossfadeMs) { _, value in Engine.setCrossfadeMS(Int(value)) }
+                            .onChange(of: crossfadeMs) { _, value in AudioPrefs.crossfadeMs = Int(value); Engine.setCrossfadeMS(Int(value)) }
                     }
                 }
 
                 Section {
-                    Toggle("Phone Remote", isOn: $remoteEnabled)
-                        .onChange(of: remoteEnabled) { _, value in
-                            Engine.webRemoteSetEnabled(value)
+                    Toggle("OpenDeezer Connect", isOn: $hosts.connectHostEnabled)
+                        .onChange(of: hosts.connectHostEnabled) { _, _ in
+                            Task { await refreshConnect() }
+                        }
+                    if hosts.connectHostEnabled, let info = connectInfo, info.enabled {
+                        HStack {
+                            Label("Discoverable as", systemImage: "dot.radiowaves.left.and.right")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(info.name.isEmpty ? info.addr : info.name)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Text(info.addr)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                } header: {
+                    Text("OpenDeezer Connect")
+                } footer: {
+                    Text("Let your other OpenDeezer devices (same Deezer account) find this iPhone and control its playback over the local network.")
+                }
+
+                Section {
+                    Toggle("Phone Remote", isOn: $hosts.phoneRemoteEnabled)
+                        .onChange(of: hosts.phoneRemoteEnabled) { _, _ in
                             Task { await refreshRemote() }
                         }
-                    if remoteEnabled, let info = remoteInfo, info.enabled {
+                    if hosts.phoneRemoteEnabled, let info = remoteInfo, info.enabled {
                         VStack(spacing: 10) {
                             if let qrImage {
                                 Image(uiImage: qrImage)
@@ -140,18 +167,24 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .task { await refreshRemote() }
+            .task {
+                await refreshRemote()
+                await refreshConnect()
+            }
         }
     }
 
     private func refreshRemote() async {
         let info = await Engine.webRemoteInfo()
         remoteInfo = info
-        remoteEnabled = info?.enabled ?? false
         if let data = await Engine.webRemoteQRPNG(), let image = UIImage(data: data) {
             qrImage = image
         } else {
             qrImage = nil
         }
+    }
+
+    private func refreshConnect() async {
+        connectInfo = await Engine.connectHostInfo()
     }
 }

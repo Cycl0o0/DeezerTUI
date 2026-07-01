@@ -63,33 +63,37 @@ struct LyricsView: View {
     // MARK: - Synced (Apple Music style, tap-to-seek + auto-scroll)
 
     private var syncedView: some View {
-        ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 22) {
-                    Color.clear.frame(height: 8)
-                    ForEach(Array(syncedLines.enumerated()), id: \.offset) { index, line in
-                        Text(line.text)
-                            .font(.title2.weight(.bold))
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .foregroundStyle(color(for: index))
-                            .opacity(opacity(for: index))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .scaleEffect(index == activeIndex ? 1.0 : 0.96, anchor: .leading)
-                            .animation(.easeOut(duration: 0.25), value: activeIndex)
-                            .contentShape(Rectangle())
-                            .id(index)
-                            .onTapGesture { player.seek(to: line.timeMs) }
+        // Explicit line width from the actual viewport so long lines WRAP in
+        // portrait (previously they rendered as single wide lines and got
+        // clipped off the left; only fit unwrapped in landscape's width).
+        GeometryReader { geo in
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 22) {
+                        Color.clear.frame(height: 8)
+                        ForEach(Array(syncedLines.enumerated()), id: \.offset) { index, line in
+                            Text(line.text)
+                                .font(.title2.weight(.bold))
+                                .multilineTextAlignment(.leading)
+                                .foregroundStyle(color(for: index))
+                                .opacity(opacity(for: index))
+                                .frame(width: max(0, geo.size.width - 52), alignment: .leading)
+                                .scaleEffect(index == activeIndex ? 1.0 : 0.96, anchor: .leading)
+                                .animation(.easeOut(duration: 0.25), value: activeIndex)
+                                .contentShape(Rectangle())
+                                .id(index)
+                                .onTapGesture { player.seek(to: line.timeMs) }
+                        }
+                        Color.clear.frame(height: 240)
                     }
-                    Color.clear.frame(height: 240)
+                    .padding(.horizontal, 26)
+                    .padding(.top, 12)
                 }
-                .padding(.horizontal, 26)
-                .padding(.top, 12)
-            }
-            .onChange(of: activeIndex) { _, idx in
-                guard let idx else { return }
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    proxy.scrollTo(idx, anchor: UnitPoint(x: 0, y: 0.32))
+                .onChange(of: activeIndex) { _, idx in
+                    guard let idx else { return }
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        proxy.scrollTo(idx, anchor: UnitPoint(x: 0, y: 0.32))
+                    }
                 }
             }
         }

@@ -43,6 +43,7 @@ final class SessionStore: ObservableObject {
             return false
         }
         if persist { KeychainStore.save(key: arlKey, value: trimmed) }
+        AudioPrefs.applyOnLaunch() // re-apply saved quality/gapless/etc. (engine keeps them in memory only)
 
         if let acct = try? await Engine.account() {
             account = acct
@@ -54,6 +55,7 @@ final class SessionStore: ObservableObject {
 
         if phase == .ready {
             PlayerController.shared.start()
+            RemoteHostStore.shared.applyOnLaunch()
             await LibraryStore.shared.refreshAll()
         }
         return true
