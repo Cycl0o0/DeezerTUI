@@ -30,6 +30,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -275,7 +276,7 @@ private fun TvTrackRow(track: Track, onClick: () -> Unit) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .androidxOnFocus { focused = it }
+                .onFocusChanged { focused = it.isFocused }
                 .clickable(onClick = onClick)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -332,7 +333,3 @@ private fun TvNowPlayingBar(
         }
     }
 }
-
-/** Small helper mirroring onFocusChanged so track rows highlight on D-pad focus. */
-private fun Modifier.androidxOnFocus(onChange: (Boolean) -> Unit): Modifier =
-    this.then(androidx.compose.ui.focus.onFocusChanged { onChange(it.isFocused) })
