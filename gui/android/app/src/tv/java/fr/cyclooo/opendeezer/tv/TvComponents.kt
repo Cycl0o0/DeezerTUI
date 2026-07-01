@@ -19,8 +19,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
@@ -37,6 +39,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -56,8 +59,8 @@ object TvPalette {
 
 /**
  * A focusable poster card for the browse shelves. Lifts, scales and gains a
- * purple ring while focused, and its label brightens — so the selection reads
- * from across a room.
+ * purple ring while focused. Titles stay white (like Netflix/Apple TV) — focus
+ * is signalled by the scale + ring, not by dimming every other title.
  */
 @Composable
 fun TvCard(
@@ -69,10 +72,7 @@ fun TvCard(
     size: Int = 168,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.12f else 1f, label = "cardScale")
-    val labelColor by animateColorAsState(
-        if (focused) Color.White else TvPalette.TextDim, label = "cardLabel",
-    )
+    val scale by animateFloatAsState(if (focused) 1.1f else 1f, label = "cardScale")
 
     Column(
         modifier
@@ -97,7 +97,7 @@ fun TvCard(
             title,
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.SemiBold,
-            color = labelColor,
+            color = Color.White,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -113,36 +113,40 @@ fun TvCard(
     }
 }
 
-/** A titled horizontal shelf of cards; empty shelves render nothing. */
+/**
+ * A titled horizontal shelf of cards; empty shelves render nothing. The row's
+ * content padding leaves room for the focused card to scale + show its ring
+ * without being clipped by the LazyRow bounds.
+ */
 @Composable
 fun <T> TvRow(
     title: String,
     entries: List<T>,
     modifier: Modifier = Modifier,
-    card: @Composable (T) -> Unit,
+    card: @Composable (index: Int, item: T) -> Unit,
 ) {
     if (entries.isEmpty()) return
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
             title,
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
             color = Color.White,
-            modifier = Modifier.padding(start = 4.dp),
+            modifier = Modifier.padding(start = 20.dp),
         )
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(18.dp),
-            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 22.dp),
         ) {
-            items(entries) { card(it) }
+            itemsIndexed(entries) { i, item -> card(i, item) }
         }
     }
 }
 
 /**
  * A focusable pill button (Play, Search, transport…). Fills with Deezer purple
- * and scales while focused; an idle pill is a soft translucent chip. Pass a
- * [focusRequester] to grab initial focus.
+ * and scales while focused; an idle pill is a soft translucent chip. Optional
+ * [leadingIcon] and [focusRequester] (to grab initial focus).
  */
 @Composable
 fun TvPill(
@@ -150,13 +154,14 @@ fun TvPill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
+    leadingIcon: ImageVector? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.06f else 1f, label = "pillScale")
     val bg by animateColorAsState(if (focused) TvPalette.Purple else TvPalette.CardIdle, label = "pillBg")
     val fg = if (focused) Color.White else TvPalette.TextDim
 
-    Box(
+    Row(
         modifier
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .scale(scale)
@@ -169,15 +174,22 @@ fun TvPill(
             )
             .clickable(onClick = onClick)
             .padding(horizontal = 22.dp, vertical = 12.dp),
-        contentAlignment = Alignment.Center,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(label, color = fg, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        if (leadingIcon != null) {
+            Icon(leadingIcon, contentDescription = null, tint = fg, modifier = Modifier.size(22.dp))
+        }
+        if (label.isNotEmpty()) {
+            Text(label, color = fg, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        }
     }
 }
 
 /**
- * The featured hero at the top of the browse screen: big art, a title, and a
- * primary "Play" pill (which takes initial focus) plus a "Search" pill.
+ * The cinematic featured hero at the top of Home: the artwork as a blurred
+ * full-bleed backdrop with a left-to-right ink scrim, a sharp poster, the title,
+ * and a primary "Play" pill (which takes initial focus) plus "Search".
  */
 @Composable
 fun TvHero(
@@ -187,49 +199,62 @@ fun TvHero(
     onPlay: () -> Unit,
     onSearch: () -> Unit,
     playFocus: FocusRequester,
+    playIcon: ImageVector,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier.fillMaxWidth().height(300.dp),
-        horizontalArrangement = Arrangement.spacedBy(28.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(360.dp)
+            .clip(RoundedCornerShape(24.dp)),
     ) {
+        // Blurred backdrop (blur is a no-op below Android 12 — still fine).
+        Artwork(artworkUrl, Modifier.fillMaxSize().blur(30.dp), corner = 0)
         Box(
-            Modifier
-                .size(300.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)), RoundedCornerShape(20.dp)),
+            Modifier.fillMaxSize().background(
+                Brush.horizontalGradient(
+                    0f to TvPalette.Ink,
+                    0.45f to TvPalette.Ink.copy(alpha = 0.75f),
+                    1f to Color.Transparent,
+                ),
+            ),
+        )
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(listOf(Color.Transparent, TvPalette.Ink.copy(alpha = 0.6f))),
+            ),
+        )
+        Row(
+            Modifier.fillMaxSize().padding(40.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(32.dp),
         ) {
-            Artwork(artworkUrl, Modifier.fillMaxSize(), corner = 20)
-        }
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text(
-                "FEATURED",
-                style = MaterialTheme.typography.labelLarge,
-                color = TvPalette.Purple,
-                fontWeight = FontWeight.Bold,
-            )
-            Text(
-                title,
-                style = MaterialTheme.typography.displaySmall,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (subtitle.isNotBlank()) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text("FEATURED", style = MaterialTheme.typography.labelLarge, color = TvPalette.Purple, fontWeight = FontWeight.Bold)
                 Text(
-                    subtitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = TvPalette.TextDim,
-                    maxLines = 1,
+                    title,
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (subtitle.isNotBlank()) {
+                    Text(subtitle, style = MaterialTheme.typography.titleMedium, color = TvPalette.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    TvPill("Play", onPlay, focusRequester = playFocus, leadingIcon = playIcon)
+                    TvPill("Search", onSearch)
+                }
             }
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                TvPill("▶  Play", onPlay, focusRequester = playFocus)
-                TvPill("Search", onSearch)
+            Box(
+                Modifier
+                    .size(260.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)), RoundedCornerShape(18.dp)),
+            ) {
+                Artwork(artworkUrl, Modifier.fillMaxSize(), corner = 18)
             }
         }
     }

@@ -68,8 +68,22 @@ fun TvSettingsScreen(account: Account?, onLogout: () -> Unit) {
     var remoteInfo by remember { mutableStateOf<WebRemoteInfo?>(null) }
     var remoteQr by remember { mutableStateOf<ByteArray?>(null) }
     var devices by remember { mutableStateOf<List<ConnectDevice>?>(null) }
+    var scanning by remember { mutableStateOf(false) }
     var connected by remember { mutableStateOf(Engine.connectedDevice()) }
     var updateText by remember { mutableStateOf("") }
+
+    fun rescanDevices() {
+        if (scanning) return
+        scanning = true
+        scope.launch {
+            try {
+                devices = Engine.discoverDevices(700L)
+                connected = Engine.connectedDevice()
+            } finally {
+                scanning = false
+            }
+        }
+    }
 
     LaunchedEffect(phoneRemote) {
         if (phoneRemote) {
@@ -109,6 +123,13 @@ fun TvSettingsScreen(account: Account?, onLogout: () -> Unit) {
                             quality = i; Engine.setQuality(i)
                         }
                     }
+                }
+                if (account != null && !account.canHifi) {
+                    Text(
+                        if (account.canHq) "HiFi needs a Deezer HiFi plan." else "High/HiFi need a Deezer HQ or HiFi plan.",
+                        color = TvPalette.TextDim,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
         }
@@ -173,17 +194,17 @@ fun TvSettingsScreen(account: Account?, onLogout: () -> Unit) {
             }
         }
         item {
-            TvToggleRow(
+            TvActionRow(
                 "Play on another device",
-                connected.ifBlank { "This device" }.let { if (connected.isBlank()) "Playing here · open to pick a device" else "Connected to $connected" },
-                checked = connected.isNotBlank(),
-                showToggle = false,
-            ) {
-                if (devices == null) scope.launch {
-                    devices = Engine.discoverDevices(700L)
-                    connected = Engine.connectedDevice()
-                }
-            }
+                when {
+                    scanning -> "Searching your network…"
+                    connected.isNotBlank() -> "Connected to $connected"
+                    else -> "Playing here · open to pick a device"
+                },
+            ) { rescanDevices() }
+        }
+        if (scanning && devices == null) {
+            item { Box(Modifier.padding(start = 12.dp)) { CircularProgressIndicator(color = TvPalette.Purple) } }
         }
         devices?.let { list ->
             item {
@@ -198,6 +219,7 @@ fun TvSettingsScreen(account: Account?, onLogout: () -> Unit) {
                             scope.launch { if (Engine.connectDevice(d.addr)) connected = Engine.connectedDevice() }
                         }
                     }
+                    TvDeviceRow(if (scanning) "Searching…" else "Rescan", "Look for devices again", selected = false) { rescanDevices() }
                 }
             }
         }

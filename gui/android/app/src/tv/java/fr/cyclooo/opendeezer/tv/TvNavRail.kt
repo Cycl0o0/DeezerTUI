@@ -8,11 +8,14 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -50,7 +53,8 @@ enum class TvNav(val label: String, val icon: ImageVector) {
 /**
  * A YouTube-TV / Netflix-style left navigation rail: a slim icon strip that
  * expands to reveal labels while any of its items holds D-pad focus, then
- * collapses when focus moves back into the content.
+ * collapses when focus moves back into the content. A persistent purple accent
+ * bar marks the selected tab even while collapsed.
  */
 @Composable
 fun TvNavRail(
@@ -59,14 +63,18 @@ fun TvNavRail(
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val width by animateDpAsState(if (expanded) 220.dp else 84.dp, label = "railWidth")
+    val width by animateDpAsState(if (expanded) 220.dp else 88.dp, label = "railWidth")
 
     Column(
         modifier
             .fillMaxHeight()
             .width(width)
             .background(Color.Black.copy(alpha = 0.35f))
-            .padding(vertical = 28.dp, horizontal = 14.dp),
+            // hasFocus is true while any child holds focus, so the rail expands
+            // on entry and collapses the moment focus returns to the content.
+            .onFocusChanged { expanded = it.hasFocus }
+            .focusGroup()
+            .padding(vertical = 28.dp, horizontal = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         TvNav.entries.forEach { item ->
@@ -74,7 +82,6 @@ fun TvNavRail(
                 item = item,
                 selected = item == selected,
                 expanded = expanded,
-                onFocused = { expanded = true },
                 onClick = { onSelect(item) },
             )
         }
@@ -86,13 +93,12 @@ private fun TvNavItem(
     item: TvNav,
     selected: Boolean,
     expanded: Boolean,
-    onFocused: () -> Unit,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
     val bg = when {
         focused -> TvPalette.Purple
-        selected -> TvPalette.Purple.copy(alpha = 0.22f)
+        selected -> TvPalette.Purple.copy(alpha = 0.20f)
         else -> Color.Transparent
     }
     val fg = if (focused) Color.White else if (selected) TvPalette.Purple else TvPalette.TextDim
@@ -101,14 +107,19 @@ private fun TvNavItem(
         Modifier
             .clip(RoundedCornerShape(16.dp))
             .background(bg)
-            .onFocusChanged {
-                focused = it.isFocused
-                if (it.isFocused) onFocused()
-            }
+            .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 12.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Selected accent bar — readable even when the rail is collapsed.
+        Box(
+            Modifier
+                .width(4.dp).height(26.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(if (selected && !focused) TvPalette.Purple else Color.Transparent),
+        )
+        Spacer(Modifier.width(8.dp))
         Icon(item.icon, contentDescription = item.label, tint = fg, modifier = Modifier.size(28.dp))
         AnimatedVisibility(
             visible = expanded,
