@@ -119,6 +119,7 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
                         onClick = {
                             quality = index
                             Engine.setQuality(index)
+                            prefs.audioQuality = index
                         },
                         shape = SegmentedButtonDefaults.itemShape(index, qualityLabels.size),
                         enabled = canSelectQuality(account, index),
@@ -136,10 +137,12 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
             SettingSwitch("ReplayGain", "Normalise loudness across tracks", replayGain) {
                 replayGain = it
                 Engine.setReplayGain(it)
+                prefs.replayGain = if (it) 1 else 0
             }
             SettingSwitch("Gapless playback", "No silence between tracks", gapless) {
                 gapless = it
                 Engine.setGapless(it)
+                prefs.gapless = if (it) 1 else 0
             }
 
             HorizontalDivider()
@@ -154,7 +157,11 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
                 Slider(
                     value = crossfadeSec,
                     onValueChange = { crossfadeSec = it },
-                    onValueChangeFinished = { Engine.setCrossfadeMs((crossfadeSec * 1000).toInt()) },
+                    onValueChangeFinished = {
+                        val ms = (crossfadeSec * 1000).toInt()
+                        Engine.setCrossfadeMs(ms)
+                        prefs.crossfadeMs = ms
+                    },
                     valueRange = 0f..12f,
                     steps = 11,
                 )

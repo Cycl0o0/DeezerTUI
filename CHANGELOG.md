@@ -4,18 +4,31 @@ All notable changes to OpenDeezer are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.2]
 
 ### Added
 - **Android TV**: a second Gradle flavor (`tv`, app id `fr.cyclooo.opendeezer.tv`)
-  ships a D-pad-driven, 10-foot Compose UI on the leanback launcher — focusable
-  Flow / Made-for-you / Charts / Albums / Playlists shelves, search, album/playlist
-  detail lists and a now-playing bar. Reuses the same engine, `AppViewModel` and
-  `PlayerController` as the phone app; no `androidx.tv` dependency. Built with
-  `assembleTvDebug` (phone app is `assembleMobileDebug`).
-- **Android remote settings**: Settings now has an *OpenDeezer Connect — make this
-  device reachable* toggle (advertise as a Connect host) alongside the existing
-  phone remote. Both toggles persist and are re-applied after login.
+  ships a D-pad-driven, 10-foot Compose UI on the leanback launcher. A
+  Netflix/YouTube-style **left navigation rail** (Home / Search / Library /
+  Settings) that expands with labels on focus; a cinematic **featured hero**;
+  focusable poster shelves (Flow / Made-for-you / Charts / Albums / Playlists);
+  album & playlist **detail** pages; a full **Settings** screen; and a now-playing
+  bar with a progress bar and Material transport controls. Reuses the same engine,
+  `AppViewModel` and `PlayerController` as the phone app; no `androidx.tv`
+  dependency. Built with `assembleTvDebug` (phone app is `assembleMobileDebug`).
+- **WebView sign-in on Android TV**: log in with your real Deezer account and the
+  ARL is captured automatically — no token to type on a remote (manual-paste
+  fallback kept).
+- **Android remote settings** (phone + TV): Settings now has an *OpenDeezer
+  Connect — make this device reachable* toggle (advertise as a Connect host, with
+  the LAN address shown) and a *phone remote* toggle with QR + pairing code, plus
+  a *play on another device* picker (discover / connect / disconnect). All persist
+  and are re-applied after login.
+
+### Fixed
+- **Android audio settings now persist**: quality, ReplayGain, gapless and
+  crossfade are saved to preferences and re-applied after login, so they no longer
+  reset on relaunch (same fix as iOS in 1.5.1). Applies to the phone and TV apps.
 
 ## [1.5.1]
 

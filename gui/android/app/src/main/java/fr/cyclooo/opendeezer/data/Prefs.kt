@@ -39,6 +39,32 @@ class Prefs(context: Context) {
             sp.edit().putBoolean(KEY_PHONE_REMOTE, value).apply()
         }
 
+    // ---- Audio preferences ----
+    // The engine keeps these in memory only, so they'd reset every relaunch.
+    // We persist them here and re-apply after login (see AppViewModel). Each is
+    // stored with an "unset" sentinel (-1) so we never override the engine
+    // default until the user actually picks a value.
+
+    /** Audio quality level (0=Normal, 1=High, 2=HiFi); -1 = unset. */
+    var audioQuality: Int
+        get() = sp.getInt(KEY_QUALITY, -1)
+        set(value) { sp.edit().putInt(KEY_QUALITY, value).apply() }
+
+    /** ReplayGain: 1=on, 0=off, -1=unset. */
+    var replayGain: Int
+        get() = sp.getInt(KEY_REPLAYGAIN, -1)
+        set(value) { sp.edit().putInt(KEY_REPLAYGAIN, value).apply() }
+
+    /** Gapless: 1=on, 0=off, -1=unset. */
+    var gapless: Int
+        get() = sp.getInt(KEY_GAPLESS, -1)
+        set(value) { sp.edit().putInt(KEY_GAPLESS, value).apply() }
+
+    /** Crossfade in milliseconds; -1 = unset. */
+    var crossfadeMs: Int
+        get() = sp.getInt(KEY_CROSSFADE, -1)
+        set(value) { sp.edit().putInt(KEY_CROSSFADE, value).apply() }
+
     fun clear() {
         sp.edit().remove(KEY_ARL).apply()
     }
@@ -47,5 +73,9 @@ class Prefs(context: Context) {
         private const val KEY_ARL = "arl"
         private const val KEY_CONNECT_HOST = "connect_host_enabled"
         private const val KEY_PHONE_REMOTE = "phone_remote_enabled"
+        private const val KEY_QUALITY = "audio_quality"
+        private const val KEY_REPLAYGAIN = "audio_replaygain"
+        private const val KEY_GAPLESS = "audio_gapless"
+        private const val KEY_CROSSFADE = "audio_crossfade_ms"
     }
 }

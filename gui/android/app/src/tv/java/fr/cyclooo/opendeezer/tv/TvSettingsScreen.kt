@@ -120,7 +120,7 @@ fun TvSettingsScreen(account: Account?, onLogout: () -> Unit) {
                             else -> true
                         }
                         TvChoicePill(label, selected = quality == i, enabled = allowed) {
-                            quality = i; Engine.setQuality(i)
+                            quality = i; Engine.setQuality(i); prefs.audioQuality = i
                         }
                     }
                 }
@@ -135,12 +135,12 @@ fun TvSettingsScreen(account: Account?, onLogout: () -> Unit) {
         }
         item {
             TvToggleRow("ReplayGain", "Normalise loudness across tracks", replayGain) {
-                replayGain = it; Engine.setReplayGain(it)
+                replayGain = it; Engine.setReplayGain(it); prefs.replayGain = if (it) 1 else 0
             }
         }
         item {
             TvToggleRow("Gapless playback", "No silence between tracks", gapless) {
-                gapless = it; Engine.setGapless(it)
+                gapless = it; Engine.setGapless(it); prefs.gapless = if (it) 1 else 0
             }
         }
 
