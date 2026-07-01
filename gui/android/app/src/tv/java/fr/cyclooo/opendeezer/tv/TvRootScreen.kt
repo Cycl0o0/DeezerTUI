@@ -50,53 +50,69 @@ import fr.cyclooo.opendeezer.engine.Track
 import fr.cyclooo.opendeezer.ui.components.Artwork
 import kotlinx.coroutines.launch
 
-/** Internal TV navigation — a tiny back-stackless model driven by the D-pad. */
-private sealed interface TvScreen {
-    data object Browse : TvScreen
-    data object Search : TvScreen
-    data class Detail(val title: String, val subtitle: String, val artworkUrl: String, val tracks: List<Track>) : TvScreen
-}
+/** A pushed album/playlist detail view, shown as an overlay over the content. */
+private data class TvDetailData(
+    val title: String,
+    val subtitle: String,
+    val artworkUrl: String,
+    val tracks: List<Track>,
+)
 
 @Composable
 fun TvRootScreen(vm: AppViewModel) {
-    var screen by remember { mutableStateOf<TvScreen>(TvScreen.Browse) }
+    var nav by remember { mutableStateOf(TvNav.Home) }
+    var detail by remember { mutableStateOf<TvDetailData?>(null) }
     val player = vm.player
     val playerState by player.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
     fun openAlbum(a: Album) = scope.launch {
         val tracks = Engine.albumTracks(a.id)
-        if (tracks.isNotEmpty()) screen = TvScreen.Detail(a.name, a.artistLine, a.artworkUrl, tracks)
+        if (tracks.isNotEmpty()) detail = TvDetailData(a.name, a.artistLine, a.artworkUrl, tracks)
     }
     fun openPlaylist(p: Playlist) = scope.launch {
         val tracks = Engine.playlistTracks(p.id)
-        if (tracks.isNotEmpty()) screen = TvScreen.Detail(p.name, p.owner, p.artworkUrl, tracks)
+        if (tracks.isNotEmpty()) detail = TvDetailData(p.name, p.owner, p.artworkUrl, tracks)
     }
+    val playTracks = { list: List<Track>, i: Int -> player.playQueue(list, i) }
 
     Box(Modifier.fillMaxSize().background(TvPalette.screen)) {
-        Column(Modifier.fillMaxSize().padding(bottom = if (playerState.current != null) 104.dp else 0.dp)) {
-            when (val s = screen) {
-                TvScreen.Browse -> TvBrowse(
-                    onOpenSearch = { screen = TvScreen.Search },
-                    onPlayTracks = { list, i -> player.playQueue(list, i) },
-                    onOpenAlbum = { openAlbum(it) },
-                    onOpenPlaylist = { openPlaylist(it) },
-                )
-                TvScreen.Search -> TvSearch(
-                    onBack = { screen = TvScreen.Browse },
-                    onPlayTracks = { list, i -> player.playQueue(list, i) },
-                    onOpenAlbum = { openAlbum(it) },
-                    onOpenPlaylist = { openPlaylist(it) },
-                )
-                is TvScreen.Detail -> TvDetail(
-                    title = s.title,
-                    subtitle = s.subtitle,
-                    artworkUrl = s.artworkUrl,
-                    tracks = s.tracks,
-                    onBack = { screen = TvScreen.Browse },
-                    onPlayAll = { player.playQueue(s.tracks, 0) },
-                    onPlay = { i -> player.playQueue(s.tracks, i) },
-                )
+        Row(Modifier.fillMaxSize().padding(bottom = if (playerState.current != null) 104.dp else 0.dp)) {
+            TvNavRail(
+                selected = nav,
+                onSelect = { nav = it; detail = null },
+            )
+            Box(Modifier.weight(1f).fillMaxSize()) {
+                when (nav) {
+                    TvNav.Home -> TvBrowse(
+                        onOpenSearch = { nav = TvNav.Search },
+                        onPlayTracks = playTracks,
+                        onOpenAlbum = { openAlbum(it) },
+                        onOpenPlaylist = { openPlaylist(it) },
+                    )
+                    TvNav.Search -> TvSearch(
+                        onPlayTracks = playTracks,
+                        onOpenAlbum = { openAlbum(it) },
+                        onOpenPlaylist = { openPlaylist(it) },
+                    )
+                    TvNav.Library -> TvLibrary(
+                        onPlayTracks = playTracks,
+                        onOpenPlaylist = { openPlaylist(it) },
+                    )
+                    TvNav.Settings -> TvSettingsScreen(account = vm.account, onLogout = { vm.logout() })
+                }
+
+                detail?.let { d ->
+                    TvDetail(
+                        title = d.title,
+                        subtitle = d.subtitle,
+                        artworkUrl = d.artworkUrl,
+                        tracks = d.tracks,
+                        onBack = { detail = null },
+                        onPlayAll = { player.playQueue(d.tracks, 0) },
+                        onPlay = { i -> player.playQueue(d.tracks, i) },
+                    )
+                }
             }
         }
 
@@ -146,17 +162,9 @@ private fun TvBrowse(
 
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 36.dp, bottom = 40.dp),
+        contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 40.dp, bottom = 40.dp),
         verticalArrangement = Arrangement.spacedBy(34.dp),
     ) {
-        item {
-            Text(
-                "OpenDeezer",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Black,
-                color = TvPalette.Purple,
-            )
-        }
         h.topTracks.firstOrNull()?.let { feat ->
             item {
                 TvHero(
@@ -209,7 +217,6 @@ private fun TvBrowse(
 
 @Composable
 private fun TvSearch(
-    onBack: () -> Unit,
     onPlayTracks: (List<Track>, Int) -> Unit,
     onOpenAlbum: (Album) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit,
@@ -218,6 +225,17 @@ private fun TvSearch(
     var results by remember { mutableStateOf<SearchResults?>(null) }
     var searching by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    val runSearch = {
+        val q = query.trim()
+        if (q.isNotEmpty()) {
+            searching = true
+            scope.launch {
+                results = Engine.search(q)
+                searching = false
+            }
+        }
+    }
 
     Column(
         Modifier.fillMaxSize().padding(48.dp),
@@ -232,20 +250,7 @@ private fun TvSearch(
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = TvPalette.Purple) },
                 modifier = Modifier.width(600.dp),
             )
-            TvPill(
-                "Go",
-                onClick = {
-                    val q = query.trim()
-                    if (q.isNotEmpty()) {
-                        searching = true
-                        scope.launch {
-                            results = Engine.search(q)
-                            searching = false
-                        }
-                    }
-                },
-            )
-            TvPill("Back", onClick = onBack)
+            TvPill("Search", onClick = runSearch)
         }
 
         if (searching) {
@@ -278,6 +283,60 @@ private fun TvSearch(
 }
 
 @Composable
+private fun TvLibrary(
+    onPlayTracks: (List<Track>, Int) -> Unit,
+    onOpenPlaylist: (Playlist) -> Unit,
+) {
+    var liked by remember { mutableStateOf<List<Track>?>(null) }
+    var playlists by remember { mutableStateOf<List<Playlist>>(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        liked = Engine.favorites()
+        playlists = Engine.playlists()
+    }
+
+    if (liked == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(color = TvPalette.Purple)
+        }
+        return
+    }
+    val likedList = liked!!
+
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 40.dp, end = 40.dp, top = 40.dp, bottom = 40.dp),
+        verticalArrangement = Arrangement.spacedBy(34.dp),
+    ) {
+        item {
+            Text(
+                "Your Library",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Black,
+                color = Color.White,
+            )
+        }
+        item {
+            TvRow("Liked songs", likedList) { t ->
+                TvCard(t.name, t.artistLine, t.artworkUrl, onClick = {
+                    onPlayTracks(likedList, likedList.indexOf(t))
+                })
+            }
+        }
+        item {
+            TvRow("Your playlists", playlists) { p ->
+                TvCard(p.name, p.owner, p.artworkUrl, onClick = { onOpenPlaylist(p) })
+            }
+        }
+        if (likedList.isEmpty() && playlists.isEmpty()) {
+            item {
+                Text("Nothing saved yet.", color = TvPalette.TextDim, style = MaterialTheme.typography.titleMedium)
+            }
+        }
+    }
+}
+
+@Composable
 private fun TvDetail(
     title: String,
     subtitle: String,
@@ -290,7 +349,10 @@ private fun TvDetail(
     val playFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { playFocus.requestFocus() } }
 
-    Column(Modifier.fillMaxSize().padding(48.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+    Column(
+        Modifier.fillMaxSize().background(TvPalette.screen).padding(48.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
         Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(180.dp).clip(RoundedCornerShape(16.dp))) {
                 Artwork(artworkUrl, Modifier.fillMaxSize(), corner = 16)
