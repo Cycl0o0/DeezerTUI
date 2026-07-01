@@ -31,6 +31,7 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
+	"github.com/Cycl0o0/OpenDeezer/internal/update"
 )
 
 func main() {} // required for buildmode=c-archive
@@ -653,6 +654,15 @@ func DZHomeJSON() *C.char {
 		"topAlbums": toJAlbums(albums),
 		"playlists": toJPlaylists(ps),
 	}, nil)
+}
+
+// DZCheckUpdateJSON checks GitHub for a newer OpenDeezer release and returns
+// {current, latest, hasUpdate, url, notes}. Network failure -> hasUpdate:false.
+//
+//export DZCheckUpdateJSON
+func DZCheckUpdateJSON() *C.char {
+	info, _ := update.Check(coreVersion)
+	return jsonStr(info, nil)
 }
 
 // DZArtistTopJSON returns an artist's most popular tracks.

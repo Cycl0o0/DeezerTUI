@@ -29,6 +29,7 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
 	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
+	"github.com/Cycl0o0/OpenDeezer/internal/update"
 )
 
 // Version is the engine/app version.
@@ -173,6 +174,13 @@ func Init(arl string) bool {
 
 // LoggedIn reports whether Init succeeded.
 func LoggedIn() bool { c := curClient(); return c != nil && c.LoggedIn() }
+
+// CheckUpdate checks GitHub for a newer release; returns JSON
+// {current, latest, hasUpdate, url, notes}.
+func CheckUpdate() string {
+	info, _ := update.Check(Version)
+	return jstr(info, nil)
+}
 
 // ---- account / settings ----
 
