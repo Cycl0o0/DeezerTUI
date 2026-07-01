@@ -836,7 +836,7 @@ void MainWindow::buildMenu() {
     auto *about = help->addAction("&About OpenDeezer");
     connect(about, &QAction::triggered, this, [this] {
         QString text =
-            "<h3>OpenDeezer 1.5.0</h3>"
+            "<h3>OpenDeezer 1.5.1</h3>"
             "<p>A Deezer client for the desktop.</p>";
         // Show the signed-in account tier (from DZAccountJSON) when available.
         if (m_haveAccount && !m_accountName.isEmpty())
