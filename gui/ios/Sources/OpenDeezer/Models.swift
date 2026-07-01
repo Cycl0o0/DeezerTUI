@@ -289,6 +289,15 @@ struct WebRemoteInfo: Decodable {
     let port: Int
 }
 
+// OpenDeezer Connect host info (OdmobileConnectHostInfo) — this device advertised
+// as a controllable Connect target on the LAN. addr/name empty when disabled.
+struct ConnectHostInfo: Decodable {
+    let enabled: Bool
+    let addr: String
+    let port: Int
+    let name: String
+}
+
 // Update-check result (OdmobileCheckUpdate) — tagged lowerCamelCase.
 // A network failure comes back with hasUpdate == false.
 struct UpdateInfo: Decodable {

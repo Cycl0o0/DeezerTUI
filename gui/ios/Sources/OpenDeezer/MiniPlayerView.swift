@@ -1,11 +1,32 @@
 import SwiftUI
 
-/// Floating Liquid-Glass mini player docked above the tab bar. Tapping it
-/// (handled by the parent) opens the full Now Playing sheet.
+/// Compact now-playing bar. In `accessory` mode it renders inside the iOS 26
+/// `tabViewBottomAccessory` (the system supplies the Liquid-Glass container that
+/// docks above the tab bar); otherwise it draws its own glass pill for the
+/// pre-iOS-26 `safeAreaInset` fallback. Tapping it (handled by the parent) opens
+/// the full Now Playing sheet.
 struct MiniPlayerView: View {
     @EnvironmentObject private var player: PlayerController
+    var accessory = false
 
     var body: some View {
+        if accessory {
+            row
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+        } else {
+            row
+                .padding(.leading, 8)
+                .padding(.trailing, 10)
+                .padding(.vertical, 6)
+                .frame(height: Palette.miniPlayerHeight)
+                .glassPill()
+                .overlay(alignment: .bottom) { progressBar }
+        }
+    }
+
+    private var row: some View {
         HStack(spacing: 12) {
             RemoteArtwork(url: player.current?.artworkUrl ?? "", cornerRadius: 8)
                 .frame(width: 40, height: 40)
@@ -42,22 +63,17 @@ struct MiniPlayerView: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 10)
-        .padding(.vertical, 6)
-        .frame(height: Palette.miniPlayerHeight)
-        .glassPill()
-        .overlay(alignment: .bottom) {
-            // Thin progress indicator along the bottom edge of the pill.
-            GeometryReader { geo in
-                Capsule()
-                    .fill(Palette.accent)
-                    .frame(width: geo.size.width * progressFraction, height: 2)
-            }
-            .frame(height: 2)
-            .padding(.horizontal, 14)
-            .padding(.bottom, 3)
+    }
+
+    private var progressBar: some View {
+        GeometryReader { geo in
+            Capsule()
+                .fill(Palette.accent)
+                .frame(width: geo.size.width * progressFraction, height: 2)
         }
+        .frame(height: 2)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 3)
     }
 
     private var progressFraction: CGFloat {

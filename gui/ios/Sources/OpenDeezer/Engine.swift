@@ -174,6 +174,14 @@ enum Engine {
     }
     static func webRemoteQRPNG() async -> Data? { await run { OdmobileWebRemoteQRPNG() } }
 
+    // MARK: - OpenDeezer Connect host (make this device controllable)
+
+    static func connectHostSetEnabled(_ on: Bool) { OdmobileConnectHostSetEnabled(on ? 1 : 0) }
+    static func connectHostInfo() async -> ConnectHostInfo? {
+        let json = await run { OdmobileConnectHostInfo() }
+        return try? decode(json, as: ConnectHostInfo.self)
+    }
+
     // MARK: - Misc
 
     static func fetch(_ url: String) async -> Data? { await run { OdmobileFetch(url) } }
