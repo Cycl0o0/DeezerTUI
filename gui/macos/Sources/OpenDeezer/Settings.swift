@@ -63,6 +63,12 @@ struct SettingsView: View {
     @State private var webRemoteURL = ""
     @State private var webRemoteQRImage: NSImage? = nil
 
+    // Remote control (control API) state — read from DZControlConfigJSON on
+    // appear, applied live via DZSetControlConfig on every change.
+    @State private var controlEnabled = false
+    @State private var controlLAN = false
+    @State private var controlToken = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
@@ -86,11 +92,11 @@ struct SettingsView: View {
                         set: { app.setQuality($0) })) {
                         Text("Normal · MP3 128").tag(0)
                         Text("High · MP3 320").tag(1)
-                        Text("HiFi · FLAC").tag(2)
+                        Text("HiFi · FLAC lossless").tag(2)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    Text("HiFi streams lossless FLAC when your account and the track support it, otherwise falls back to MP3. Applied immediately and on next launch.")
+                    Text("Applied immediately and on next launch.")
                         .font(.caption).foregroundStyle(DZ.textSec)
                     if let note = app.qualityEntitlementNote {
                         Label(note, systemImage: "exclamationmark.triangle.fill")
@@ -189,9 +195,53 @@ struct SettingsView: View {
                 .tint(DZ.accent)
             }
 
-            // Phone Remote
+            // Remote control — the control API (used by the phone/web remote and
+            // by other OpenDeezer clients on the network) plus the Phone Remote
+            // pairing flow, which runs on the same server.
             settingsCard {
                 VStack(alignment: .leading, spacing: 10) {
+                    Label("Remote control", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(DZ.textPri)
+                    Text("Lets other devices control playback over the network.")
+                        .font(.caption).foregroundStyle(DZ.textSec)
+
+                    Toggle(isOn: Binding(
+                        get: { controlEnabled },
+                        set: { on in
+                            controlEnabled = on
+                            applyControlConfig()
+                        })) {
+                        Text("Enable").font(.system(size: 13)).foregroundStyle(DZ.textPri)
+                    }
+                    .toggleStyle(.switch)
+                    .tint(DZ.accent)
+
+                    Toggle(isOn: Binding(
+                        get: { controlLAN },
+                        set: { on in
+                            controlLAN = on
+                            applyControlConfig()
+                        })) {
+                        Text("Allow on local network (LAN)")
+                            .font(.system(size: 13)).foregroundStyle(DZ.textPri)
+                    }
+                    .toggleStyle(.switch)
+                    .tint(DZ.accent)
+                    .disabled(!controlEnabled)
+
+                    HStack(spacing: 8) {
+                        Text("Access token").font(.system(size: 13)).foregroundStyle(DZ.textPri)
+                        TextField("None", text: Binding(
+                            get: { controlToken },
+                            set: { controlToken = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { applyControlConfig() }
+                    }
+                    .disabled(!controlEnabled)
+                    .onChange(of: controlToken) { _, _ in applyControlConfig() }
+
+                    Divider().overlay(DZ.hairline).padding(.vertical, 2)
+
                     Toggle(isOn: Binding(
                         get: { webRemoteEnabled },
                         set: { on in
@@ -254,6 +304,7 @@ struct SettingsView: View {
         .onAppear {
             app.loadAudioDevices()
             loadWebRemoteInfo()
+            loadControlConfig()
         }
     }
 
@@ -269,6 +320,26 @@ struct SettingsView: View {
                 webRemoteQRImage = img
             }
         }
+    }
+
+    // Populate the Remote control toggles from the engine's current config.
+    private func loadControlConfig() {
+        Task.detached {
+            let cfg = Core.controlConfig()
+            await MainActor.run {
+                controlEnabled = cfg?.enabled ?? false
+                controlLAN = cfg?.lan ?? false
+                controlToken = cfg?.token ?? ""
+            }
+        }
+    }
+
+    // Persists + applies the Remote control settings on every change.
+    // addr: LAN on -> ":7654" (all interfaces), LAN off -> "" (localhost only).
+    private func applyControlConfig() {
+        Core.setControlConfig(enabled: controlEnabled,
+                              addr: controlLAN ? ":7654" : "",
+                              token: controlToken)
     }
 
     @ViewBuilder

@@ -100,6 +100,10 @@ internal static class DeezerCore
     [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr DZWebRemoteInfoJSON();
     [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr DZWebRemoteQRPNG(out int outLen);
 
+    // ---- remote control (control API / phone remote settings) ---------------
+    [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr DZControlConfigJSON();
+    [DllImport(Dll, CallingConvention = Cdecl)] internal static extern void DZSetControlConfig(int enabled, [MarshalAs(UnmanagedType.LPUTF8Str)] string addr, [MarshalAs(UnmanagedType.LPUTF8Str)] string token);
+
     // ---- Home aggregator -------------------------------------------------------
     [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr DZHomeJSON();
 
@@ -154,4 +158,5 @@ internal static class DeezerCore
         return data;
     }
     internal static HomeData Home() => Wire.ParseHome(TakeJson(DZHomeJSON()));
+    internal static string ControlConfig() => TakeJson(DZControlConfigJSON());
 }

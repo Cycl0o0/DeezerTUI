@@ -133,7 +133,7 @@ struct FreeAccountBlockedView: View {
                 .font(.system(size: 52)).foregroundStyle(DZ.accent)
             Text("OpenDeezer").font(.system(size: 22, weight: .bold)).foregroundStyle(DZ.textPri)
 
-            Text("Sorry — your account isn't supported")
+            Text("Premium required")
                 .font(.system(size: 26, weight: .bold)).foregroundStyle(DZ.textPri)
                 .multilineTextAlignment(.center)
 

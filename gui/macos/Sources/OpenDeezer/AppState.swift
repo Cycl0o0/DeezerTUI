@@ -253,10 +253,10 @@ final class AppState: ObservableObject {
         guard let a = account else { return nil }
         let plan = a.offer.isEmpty ? "plan" : "\(a.offer) plan"
         if settings.quality >= 2 && !a.canHifi {
-            return "Your \(plan) doesn't include HiFi (FLAC); playback falls back to MP3."
+            return "Your \(plan) doesn't include HiFi (FLAC)."
         }
         if settings.quality >= 1 && !a.canHq {
-            return "Your \(plan) doesn't include High (MP3 320); playback falls back to MP3 128."
+            return "Your \(plan) doesn't include High (MP3 320)."
         }
         return nil
     }
@@ -335,7 +335,7 @@ final class AppState: ObservableObject {
         listArtwork = ""
         listIsLiked = true            // gradient hero
         listHeroSymbol = "infinity"
-        listSubtitle = "Your personal soundtrack"
+        listSubtitle = ""
         busy = true
         Task.detached {
             let ts = Core.flow()

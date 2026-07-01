@@ -95,6 +95,7 @@ type Model struct {
 	webRemoteCode   string // 6-digit pairing code
 	webRemoteURL    string
 	webRemoteQR     string // terminal QR block
+	ctrlEditToken   bool   // Web Remote screen: editing the control-API token
 
 	// remote control: drive another OpenDeezer client over its control API.
 	remote        *control.Client

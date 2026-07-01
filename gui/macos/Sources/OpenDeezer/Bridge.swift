@@ -290,4 +290,26 @@ enum Core {
         defer { DZFreeBytes(ptr) }
         return Data(bytes: ptr, count: Int(length))
     }
+
+    // MARK: remote control (control API)
+
+    struct ControlConfig: Decodable {
+        let enabled: Bool
+        let addr: String
+        let token: String
+        let lan: Bool
+        let running: Bool
+    }
+
+    /// Current remote-control (control API) settings, for populating Settings.
+    static func controlConfig() -> ControlConfig? {
+        decode(ControlConfig.self, takeJSON(DZControlConfigJSON()))
+    }
+
+    /// Persists and applies the remote-control settings. addr: "" = localhost
+    /// only, ":7654" = LAN (all interfaces), or a full host:port. token: "" = no
+    /// token required.
+    static func setControlConfig(enabled: Bool, addr: String, token: String) {
+        withC2(addr, token) { a, t in DZSetControlConfig(enabled ? 1 : 0, a, t) }
+    }
 }

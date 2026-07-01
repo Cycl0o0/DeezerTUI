@@ -46,6 +46,15 @@ extern void           DZWebRemoteSetEnabled(int on);
 extern char          *DZWebRemoteInfoJSON(void);
 extern unsigned char *DZWebRemoteQRPNG(int *outLen);
 
+/* Control API (remote-control server used by the phone/MCP remotes) — off by
+ * default; configured from Settings > Remote control. DZSetControlConfig
+ * persists to the config file and applies live (starts/stops the server).
+ * addr: "" = localhost-only, ":7654" = LAN (all interfaces), or a full
+ * host:port; token: "" = no token required. Free DZControlConfigJSON's
+ * result with DZFree. */
+extern char *DZControlConfigJSON(void);
+extern void  DZSetControlConfig(int enabled, char *addr, char *token);
+
 /* Deezer "Electric Violet". */
 #define ACCENT "#A238FF"
 
@@ -1008,6 +1017,88 @@ static GtkWidget *build_device_row(App *a) {
   return row;
 }
 
+/* ---- Remote control group (control API used by the phone/MCP remotes) ----
+ * Three rows (enable / LAN / token) all feed the same DZSetControlConfig
+ * call, so each change handler just re-reads the other two and re-applies. */
+typedef struct {
+  GtkWidget *enable_row; /* AdwSwitchRow */
+  GtkWidget *lan_row;    /* AdwSwitchRow */
+  GtkWidget *token_row;  /* AdwEntryRow  */
+} CtrlWidgets;
+
+static void ctrl_apply(CtrlWidgets *cw) {
+  int enabled = adw_switch_row_get_active(ADW_SWITCH_ROW(cw->enable_row)) ? 1 : 0;
+  int lan     = adw_switch_row_get_active(ADW_SWITCH_ROW(cw->lan_row)) ? 1 : 0;
+  const char *token = gtk_editable_get_text(GTK_EDITABLE(cw->token_row));
+  DZSetControlConfig(enabled, (char *)(lan ? ":7654" : ""), (char *)(token ? token : ""));
+}
+
+static void on_ctrl_switch_changed(GObject *row, GParamSpec *ps, gpointer data) {
+  (void)row; (void)ps;
+  ctrl_apply((CtrlWidgets *)data);
+}
+
+static void on_ctrl_token_changed(GtkEditable *entry, gpointer data) {
+  (void)entry;
+  ctrl_apply((CtrlWidgets *)data);
+}
+
+/* Build the group, reading current state from DZControlConfigJSON. */
+static AdwPreferencesGroup *build_remote_control_group(void) {
+  AdwPreferencesGroup *remote = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+  adw_preferences_group_set_title(remote, "Remote control");
+
+  GtkWidget *enable_row = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(enable_row), "Enable");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(enable_row),
+                              "Control playback from another device");
+
+  GtkWidget *lan_row = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(lan_row), "Allow on local network");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(lan_row),
+                              "Off restricts connections to this computer only");
+
+  GtkWidget *token_row = adw_entry_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(token_row), "Access token");
+
+  CtrlWidgets *cw = g_new0(CtrlWidgets, 1);
+  cw->enable_row = enable_row;
+  cw->lan_row    = lan_row;
+  cw->token_row  = token_row;
+
+  /* populate from current engine state before wiring signals, to avoid a
+   * spurious write-back (consistent with on_replaygain_toggled etc.) */
+  char *j = DZControlConfigJSON();
+  if (j) {
+    JsonParser *p = json_parser_new();
+    if (json_parser_load_from_data(p, j, -1, NULL)) {
+      JsonNode *root = json_parser_get_root(p);
+      if (root && JSON_NODE_HOLDS_OBJECT(root)) {
+        JsonObject *o = json_node_get_object(root);
+        adw_switch_row_set_active(ADW_SWITCH_ROW(enable_row), jbool(o, "enabled"));
+        adw_switch_row_set_active(ADW_SWITCH_ROW(lan_row), jbool(o, "lan"));
+        char *token = jstr(o, "token");
+        gtk_editable_set_text(GTK_EDITABLE(token_row), token);
+        g_free(token);
+      }
+    }
+    g_object_unref(p);
+    DZFree(j);
+  }
+
+  /* cw's lifetime follows the group: freed once the last of the three rows
+   * (all children of `remote`) is destroyed along with it */
+  g_object_set_data_full(G_OBJECT(remote), "ctrl", cw, g_free);
+  g_signal_connect(enable_row, "notify::active", G_CALLBACK(on_ctrl_switch_changed), cw);
+  g_signal_connect(lan_row, "notify::active", G_CALLBACK(on_ctrl_switch_changed), cw);
+  g_signal_connect(token_row, "changed", G_CALLBACK(on_ctrl_token_changed), cw);
+
+  adw_preferences_group_add(remote, enable_row);
+  adw_preferences_group_add(remote, lan_row);
+  adw_preferences_group_add(remote, token_row);
+  return remote;
+}
+
 static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
   (void)action; (void)param; (void)data;
   App *a = APP;
@@ -1046,11 +1137,6 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
   adw_combo_row_set_model(ADW_COMBO_ROW(quality),
                           G_LIST_MODEL(gtk_string_list_new(qlabels)));
   adw_combo_row_set_selected(ADW_COMBO_ROW(quality), (guint)a->quality);
-  /* if the chosen tier is above what the plan allows, explain it inline */
-  if (a->acct_name && *a->acct_name &&
-      ((a->quality >= 2 && !a->can_hifi) || (a->quality >= 1 && !a->can_hq)))
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(quality),
-                                "Above your plan — Deezer may stream a lower quality");
   g_signal_connect(quality, "notify::selected", G_CALLBACK(on_quality_selected), a);
   adw_preferences_group_add(audio, quality);
 
@@ -1102,6 +1188,9 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
   g_signal_connect(bg, "notify::active", G_CALLBACK(on_background_toggled), a);
   adw_preferences_group_add(behave, bg);
   adw_preferences_page_add(page, behave);
+
+  /* ---- Remote control (control API used by the phone/MCP remotes) ---- */
+  adw_preferences_page_add(page, build_remote_control_group());
 
 #if ADW_CHECK_VERSION(1, 5, 0)
   AdwPreferencesDialog *dlg = ADW_PREFERENCES_DIALOG(adw_preferences_dialog_new());
@@ -4181,7 +4270,7 @@ static void load_account(App *a) {
     toastf(a, "%s · %s", a->acct_name,
            (a->acct_offer && *a->acct_offer) ? a->acct_offer : "Deezer");
     if ((a->quality >= 2 && !a->can_hifi) || (a->quality >= 1 && !a->can_hq))
-      toast(a, "Selected quality is above your plan — Deezer may stream lower");
+      toast(a, "Selected quality is above your plan");
   }
 }
 
@@ -4750,15 +4839,15 @@ static GtkWidget *build_sidebar(App *a) {
   /* static entries; the user's playlists are appended after login.
    * Home is row 0 — the default landing page; keep it first. */
   gtk_list_box_append(a->sidebar,
-      make_side_row("Home", "Your daily mix", "go-home-symbolic", ROW_HOME, ""));
+      make_side_row("Home", "", "go-home-symbolic", ROW_HOME, ""));
   gtk_list_box_append(a->sidebar,
-      make_side_row("Liked Songs", "Your favorites", "emblem-favorite-symbolic", ROW_LIKED, ""));
+      make_side_row("Liked Songs", "", "emblem-favorite-symbolic", ROW_LIKED, ""));
   gtk_list_box_append(a->sidebar,
-      make_side_row("Flow", "Made for you", "media-playlist-shuffle-symbolic", ROW_FLOW, ""));
+      make_side_row("Flow", "", "media-playlist-shuffle-symbolic", ROW_FLOW, ""));
   gtk_list_box_append(a->sidebar,
-      make_side_row("Charts", "Global top tracks", "view-sort-descending-symbolic", ROW_CHARTS, ""));
+      make_side_row("Charts", "", "view-sort-descending-symbolic", ROW_CHARTS, ""));
   gtk_list_box_append(a->sidebar,
-      make_side_row("Podcasts", "Search shows", "audio-x-generic-symbolic", ROW_PODCASTS, ""));
+      make_side_row("Podcasts", "", "audio-x-generic-symbolic", ROW_PODCASTS, ""));
 
   GtkWidget *scroll = gtk_scrolled_window_new();
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(a->sidebar));

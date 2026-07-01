@@ -77,6 +77,38 @@ func LoadControl() Control {
 	return c
 }
 
+// writeFile writes contents to a file under Dir(), creating the directory if
+// needed. Unlike readFile it only ever targets the primary (platform) config
+// dir — there's exactly one place a setting should be written to.
+func writeFile(name, contents string) error {
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, name), []byte(contents), 0600)
+}
+
+// SaveControlEnabled persists whether the control API starts automatically, so
+// a Settings UI can flip it without editing env vars or config files by hand.
+// addr is the bind address to remember while enabled (typically the current
+// LoadControl().Addr); pass "" to disable.
+func SaveControlEnabled(enabled bool, addr string) error {
+	v := ""
+	if enabled {
+		v = strings.TrimSpace(addr)
+	}
+	return writeFile("control.txt", v)
+}
+
+// SaveControlToken persists the control-API bearer token. "" clears it, which
+// falls back to same-account auth on a LAN bind.
+func SaveControlToken(token string) error {
+	return writeFile("control-token.txt", strings.TrimSpace(token))
+}
+
 // IsLoopbackAddr reports whether a host:port binds only the loopback interface.
 func IsLoopbackAddr(addr string) bool { return isLoopbackAddr(addr) }
 

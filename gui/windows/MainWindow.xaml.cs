@@ -799,7 +799,7 @@ public sealed partial class MainWindow : Window
         });
         sp.Children.Add(new TextBlock
         {
-            Text = "Sorry — your account isn't supported",
+            Text = "Premium required",
             FontSize = 26,
             FontWeight = FontWeights.SemiBold,
             TextWrapping = TextWrapping.Wrap,
@@ -813,9 +813,7 @@ public sealed partial class MainWindow : Window
             TextAlignment = TextAlignment.Center,
             Opacity = 0.85,
             HorizontalAlignment = HorizontalAlignment.Center,
-            Text = "OpenDeezer needs a Deezer Premium subscription to stream. " +
-                   "Your account: " + offer + ". " +
-                   "Subscribe at deezer.com, then restart OpenDeezer.",
+            Text = "Your account (" + offer + ") isn't Premium. Subscribe at deezer.com, then restart OpenDeezer.",
         });
         var quit = new Button { Content = "Quit", HorizontalAlignment = HorizontalAlignment.Center };
         quit.Click += (_, _) => QuitApp();
@@ -836,9 +834,7 @@ public sealed partial class MainWindow : Window
             Content = new TextBlock
             {
                 TextWrapping = TextWrapping.Wrap,
-                Text = "Log in with your Deezer account in the in-app browser — OpenDeezer " +
-                       "captures the login automatically, so you never have to copy an ARL by " +
-                       "hand. (Advanced: you can still paste an ARL manually.)",
+                Text = "Choose how you'd like to sign in.",
             },
             PrimaryButtonText = "Log in with Deezer",
             SecondaryButtonText = "Enter ARL manually",
@@ -2003,13 +1999,26 @@ public sealed partial class MainWindow : Window
     private async void ShowSettings()
     {
         // Output devices + current engine audio state read off the UI thread.
-        var (devJson, curDev, curGapless, curCrossfade) = await Task.Run(() =>
+        var (devJson, curDev, curGapless, curCrossfade, ctrlJson) = await Task.Run(() =>
         {
             string dj = DeezerCore.TakeJson(DeezerCore.DZAudioDevicesJSON());
             string cd = DeezerCore.CurrentAudioDevice();
-            return (dj, cd, DeezerCore.DZGapless() != 0, DeezerCore.DZCrossfadeMS());
+            string cj = DeezerCore.ControlConfig();
+            return (dj, cd, DeezerCore.DZGapless() != 0, DeezerCore.DZCrossfadeMS(), cj);
         });
         var devices = Wire.ParseDevices(devJson);
+
+        bool ctrlEnabled = false, ctrlLan = false;
+        string ctrlToken = "";
+        try
+        {
+            using var ctrlDoc = JsonDocument.Parse(string.IsNullOrEmpty(ctrlJson) ? "{}" : ctrlJson);
+            var co = ctrlDoc.RootElement;
+            ctrlEnabled = co.Bool("enabled");
+            ctrlLan = co.Bool("lan");
+            ctrlToken = co.Str("token");
+        }
+        catch { }
 
         var sp = new StackPanel { Spacing = 18, MinWidth = 360 };
 
@@ -2017,7 +2026,7 @@ public sealed partial class MainWindow : Window
         var quality = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
         quality.Items.Add("Normal — MP3 128 kbps");
         quality.Items.Add("High — MP3 320 kbps");
-        quality.Items.Add("HiFi — FLAC lossless (falls back to MP3)");
+        quality.Items.Add("HiFi — FLAC lossless");
         quality.SelectedIndex = _settings.Quality;
         var qsec = new StackPanel { Spacing = 4 };
         qsec.Children.Add(new TextBlock { Text = "Audio quality", FontWeight = FontWeights.SemiBold });
@@ -2097,12 +2106,57 @@ public sealed partial class MainWindow : Window
         tsec.Children.Add(new TextBlock { Text = "Background playback", FontWeight = FontWeights.SemiBold });
         tsec.Children.Add(tray);
 
+        // Remote control (control API / phone remote): enable, LAN reachability, token.
+        // Applies live -- every change is pushed straight to the engine, not gated
+        // behind the dialog's Save button.
+        var ctrlEnableSwitch = new ToggleSwitch
+        {
+            OnContent = "Remote control on",
+            OffContent = "Remote control off",
+            IsOn = ctrlEnabled,
+        };
+        var ctrlLanSwitch = new ToggleSwitch
+        {
+            OnContent = "Reachable on the local network",
+            OffContent = "This computer only",
+            IsOn = ctrlLan,
+            IsEnabled = ctrlEnabled,
+        };
+        var ctrlTokenBox = new TextBox
+        {
+            PlaceholderText = "Access token (optional)",
+            Text = ctrlToken,
+            IsEnabled = ctrlEnabled,
+        };
+        async void ApplyControlConfig()
+        {
+            bool on = ctrlEnableSwitch.IsOn;
+            string addr = ctrlLanSwitch.IsOn ? ":7654" : "";
+            string token = ctrlTokenBox.Text ?? "";
+            await Task.Run(() => DeezerCore.DZSetControlConfig(on ? 1 : 0, addr, token));
+        }
+        ctrlEnableSwitch.Toggled += (_, _) =>
+        {
+            ctrlLanSwitch.IsEnabled = ctrlEnableSwitch.IsOn;
+            ctrlTokenBox.IsEnabled = ctrlEnableSwitch.IsOn;
+            ApplyControlConfig();
+        };
+        ctrlLanSwitch.Toggled += (_, _) => ApplyControlConfig();
+        ctrlTokenBox.LostFocus += (_, _) => ApplyControlConfig();
+        var rcsec = new StackPanel { Spacing = 4 };
+        rcsec.Children.Add(new TextBlock { Text = "Remote control", FontWeight = FontWeights.SemiBold });
+        rcsec.Children.Add(new TextBlock { Text = "Control playback from another device on your network.", Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
+        rcsec.Children.Add(ctrlEnableSwitch);
+        rcsec.Children.Add(ctrlLanSwitch);
+        rcsec.Children.Add(ctrlTokenBox);
+
         sp.Children.Add(qsec);
         sp.Children.Add(asec);
         sp.Children.Add(gsec);
         sp.Children.Add(csec);
         sp.Children.Add(rsec);
         sp.Children.Add(tsec);
+        sp.Children.Add(rcsec);
 
         var dlg = new ContentDialog
         {

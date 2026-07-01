@@ -5,10 +5,28 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QSettings>
 #include <QVBoxLayout>
+
+// The Go engine's C API — only the remote-control calls are needed here
+// (DZFree, to release DZControlConfigJSON's result, comes along with the
+// header). Same include the other secondary KDE source files use.
+extern "C" {
+#include "libdeezercore.h"
+}
+
+// Remote-control settings (control API + phone remote). Redeclared here (like
+// mainwindow.cpp does for its own additions) so the dialog still builds
+// against an older generated header; identical redeclarations are harmless.
+extern "C" char *DZControlConfigJSON(void); // {"enabled","addr","token","lan","running"}
+extern "C" void  DZSetControlConfig(int enabled, char *addr, char *token);
+extern "C" void  DZWebRemoteSetEnabled(int on);   // 1=enable, 0=disable
+extern "C" char *DZWebRemoteInfoJSON(void);       // {"enabled":bool,...}
 
 namespace {
 const char *kKeyQuality    = "audio/qualityLevel"; // int: 0=128, 1=320, 2=FLAC
@@ -19,6 +37,17 @@ const char *kKeyGapless    = "audio/gapless";      // bool: gapless playback
 const char *kKeyCrossfade  = "audio/crossfadeMs";  // int: 0/3000/6000/12000
 
 QSettings openIni(const QString &path) { return QSettings(path, QSettings::IniFormat); }
+
+// Take ownership of a malloc'd C string from a DZ*JSON call, copy it into a
+// QByteArray and release the C buffer with DZFree (mirrors mainwindow.cpp).
+QByteArray takeJson(char *s) {
+    QByteArray b;
+    if (s) {
+        b = QByteArray(s);
+        DZFree(s);
+    }
+    return b;
+}
 } // namespace
 
 int SettingsDialog::loadQuality(const QString &iniPath) {
@@ -68,7 +97,7 @@ SettingsDialog::SettingsDialog(const QString &iniPath,
     m_quality = new QComboBox;
     m_quality->addItem(QStringLiteral("Normal — MP3 128 kbps"), 0);
     m_quality->addItem(QStringLiteral("High — MP3 320 kbps"), 1);
-    m_quality->addItem(QStringLiteral("HiFi — FLAC lossless (falls back to MP3)"), 2);
+    m_quality->addItem(QStringLiteral("HiFi — FLAC lossless"), 2);
     m_quality->setCurrentIndex(loadQuality(m_iniPath));
     audioForm->addRow(QStringLiteral("Streaming quality"), m_quality);
     m_replayGain = new QCheckBox(QStringLiteral("Normalize loudness (ReplayGain)"));
@@ -132,6 +161,62 @@ SettingsDialog::SettingsDialog(const QString &iniPath,
     behLay->addWidget(hint);
     root->addWidget(behBox);
 
+    // ---- Remote control ----
+    // Unlike the groups above, this talks to the engine directly and applies
+    // on every change (it's toggling a live server, not a playback setting).
+    auto *remoteBox  = new QGroupBox(QStringLiteral("Remote control"));
+    auto *remoteForm = new QFormLayout(remoteBox);
+
+    m_ctrlEnable = new QCheckBox(QStringLiteral("Enable remote control"));
+    remoteForm->addRow(QString(), m_ctrlEnable);
+
+    m_ctrlLan = new QCheckBox(QStringLiteral("Allow on local network (LAN)"));
+    remoteForm->addRow(QString(), m_ctrlLan);
+
+    m_ctrlToken = new QLineEdit;
+    m_ctrlToken->setPlaceholderText(QStringLiteral("None"));
+    remoteForm->addRow(QStringLiteral("Access token"), m_ctrlToken);
+
+    m_phoneRemote = new QCheckBox(QStringLiteral("Enable Phone Remote"));
+    remoteForm->addRow(QString(), m_phoneRemote);
+
+    auto *remoteHint = new QLabel(QStringLiteral(
+        "Lets another OpenDeezer app or your phone control playback over the "
+        "network."));
+    remoteHint->setWordWrap(true);
+    QFont ref = remoteHint->font();
+    ref.setPointSize(qMax(1, ref.pointSize() - 1));
+    remoteHint->setFont(ref);
+    remoteForm->addRow(remoteHint);
+    root->addWidget(remoteBox);
+
+    // Seed both controls from the engine's current state.
+    {
+        const QJsonObject cfg =
+            QJsonDocument::fromJson(takeJson(DZControlConfigJSON())).object();
+        m_ctrlEnable->setChecked(cfg.value("enabled").toBool());
+        m_ctrlLan->setChecked(cfg.value("lan").toBool());
+        m_ctrlToken->setText(cfg.value("token").toString());
+    }
+    m_ctrlLan->setEnabled(m_ctrlEnable->isChecked());
+    m_ctrlToken->setEnabled(m_ctrlEnable->isChecked());
+    {
+        const QJsonObject info =
+            QJsonDocument::fromJson(takeJson(DZWebRemoteInfoJSON())).object();
+        m_phoneRemote->setChecked(info.value("enabled").toBool());
+    }
+
+    // Apply live on every change — no need to wait for OK.
+    connect(m_ctrlEnable, &QCheckBox::toggled, this, [this](bool on) {
+        m_ctrlLan->setEnabled(on);
+        m_ctrlToken->setEnabled(on);
+        applyControlConfig();
+    });
+    connect(m_ctrlLan, &QCheckBox::toggled, this, [this] { applyControlConfig(); });
+    connect(m_ctrlToken, &QLineEdit::editingFinished, this, [this] { applyControlConfig(); });
+    connect(m_phoneRemote, &QCheckBox::toggled, this,
+            [](bool on) { DZWebRemoteSetEnabled(on ? 1 : 0); });
+
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     // Deezer-purple accent on the default action.
     buttons->button(QDialogButtonBox::Ok)->setStyleSheet(
@@ -169,4 +254,17 @@ void SettingsDialog::save() {
         emit outputDeviceChanged(dev);
     emit gaplessChanged(gap);
     emit crossfadeChanged(xf);
+
+    // The remote-control group already applies itself live on every change;
+    // this just catches a token edit still pending when OK is pressed.
+    applyControlConfig();
+}
+
+void SettingsDialog::applyControlConfig() {
+    const bool enabled = m_ctrlEnable->isChecked();
+    const QByteArray addr  = m_ctrlLan->isChecked() ? QByteArray(":7654") : QByteArray();
+    const QByteArray token = m_ctrlToken->text().toUtf8();
+    DZSetControlConfig(enabled ? 1 : 0,
+                        const_cast<char *>(addr.constData()),
+                        const_cast<char *>(token.constData()));
 }

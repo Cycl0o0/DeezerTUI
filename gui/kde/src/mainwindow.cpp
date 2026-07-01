@@ -757,9 +757,7 @@ void MainWindow::buildMenu() {
     connect(about, &QAction::triggered, this, [this] {
         QString text =
             "<h3>OpenDeezer 1.5.0</h3>"
-            "<p>An open source reimplementation of Deezer.</p>"
-            "<p>Native KDE / Qt6 client. The engine (login, browse, Blowfish"
-            " decrypt, MP3 decode, playback) is a Go core linked in-process.</p>";
+            "<p>A Deezer client for the desktop.</p>";
         // Show the signed-in account tier (from DZAccountJSON) when available.
         if (m_haveAccount && !m_accountName.isEmpty())
             text += QStringLiteral("<p>Signed in as <b>%1</b> · %2</p>")
@@ -978,7 +976,7 @@ void MainWindow::loadHome() {
                               : h < 18 ? QStringLiteral("Good afternoon")
                                        : QStringLiteral("Good evening"));
     }
-    statusBar()->showMessage(QStringLiteral("Loading home…"));
+    statusBar()->showMessage(QStringLiteral("Loading…"));
     QtConcurrent::run([this] {
         const QByteArray j = takeJson(DZHomeJSON());
         QMetaObject::invokeMethod(this, [this, j] {
@@ -1374,7 +1372,7 @@ void MainWindow::startLogin() {
             } else {
                 // The stored ARL is stale — fall back to the login dialog so the
                 // user can re-authenticate without editing files by hand.
-                statusBar()->showMessage("Stored login expired — please sign in", 4000);
+                statusBar()->showMessage("Session expired — sign in again", 4000);
                 promptLogin();
             }
         }, Qt::QueuedConnection);
@@ -1454,8 +1452,8 @@ void MainWindow::showFreeAccountBlock() {
     const QString offer = m_accountOffer.isEmpty()
         ? QStringLiteral("Deezer Free") : m_accountOffer;
     const QString body =
-        QStringLiteral("OpenDeezer needs a Deezer Premium subscription to stream. "
-                       "Your account: %1. Subscribe at deezer.com, then restart "
+        QStringLiteral("OpenDeezer streams on demand, which needs Deezer Premium. "
+                       "You're on %1 — subscribe at deezer.com, then restart "
                        "OpenDeezer.").arg(offer);
 
     // Build the page once; refresh the offer line on later (re-)logins.
@@ -1464,7 +1462,7 @@ void MainWindow::showFreeAccountBlock() {
         auto *outer = new QVBoxLayout(m_blockPage);
         outer->addStretch(1);
 
-        auto *title = new QLabel(QStringLiteral("Sorry — your account isn't supported"));
+        auto *title = new QLabel(QStringLiteral("Premium required"));
         title->setAlignment(Qt::AlignCenter);
         title->setWordWrap(true);
         QFont tf = title->font();
@@ -1515,7 +1513,7 @@ void MainWindow::loadFavorites() {
         return;
     m_tracksHeader->setText("Liked Songs");
     m_currentPlaylistId.clear();
-    statusBar()->showMessage("Loading liked songs…");
+    statusBar()->showMessage("Loading…");
     QtConcurrent::run([this] {
         const QVector<Track> tracks = parseTracks(takeJson(DZFavoritesJSON()));
         QMetaObject::invokeMethod(this, [this, tracks] {
@@ -1538,7 +1536,7 @@ void MainWindow::loadFlow() {
         return;
     m_tracksHeader->setText("Flow");
     m_currentPlaylistId.clear();
-    statusBar()->showMessage("Loading Flow…");
+    statusBar()->showMessage("Loading…");
     QtConcurrent::run([this] {
         const QVector<Track> tracks = parseTracks(takeJson(DZFlowJSON()));
         QMetaObject::invokeMethod(this, [this, tracks] {
@@ -1557,7 +1555,7 @@ void MainWindow::loadFlow() {
 void MainWindow::loadCharts() {
     if (!m_loggedIn)
         return;
-    statusBar()->showMessage("Loading charts…");
+    statusBar()->showMessage("Loading…");
     QtConcurrent::run([this] {
         const QByteArray j = takeJson(DZChartsJSON());
         QMetaObject::invokeMethod(this, [this, j] {
@@ -1613,7 +1611,7 @@ void MainWindow::loadCharts() {
 void MainWindow::loadPlaylists() {
     if (!m_loggedIn)
         return;
-    statusBar()->showMessage("Loading playlists…");
+    statusBar()->showMessage("Loading…");
     QtConcurrent::run([this] {
         QVector<Playlist> ps;
         const QJsonObject obj = QJsonDocument::fromJson(takeJson(DZPlaylistsJSON())).object();
@@ -1643,7 +1641,7 @@ void MainWindow::loadPlaylists() {
 }
 
 void MainWindow::openPlaylist(const Playlist &p) {
-    statusBar()->showMessage("Loading playlist…");
+    statusBar()->showMessage("Loading…");
     m_tracksHeader->setText(p.owner.isEmpty() ? p.name : p.name + "   ·   " + p.owner);
     m_currentPlaylistId = p.id; // enables "Remove from this playlist" in the track menu
     const QByteArray id = p.id.toUtf8();
@@ -1660,7 +1658,7 @@ void MainWindow::openPlaylist(const Playlist &p) {
 }
 
 void MainWindow::openAlbum(const Album &a) {
-    statusBar()->showMessage("Loading album…");
+    statusBar()->showMessage("Loading…");
     m_tracksHeader->setText(a.artistLine.isEmpty() ? a.name : a.name + "   ·   " + a.artistLine);
     m_currentPlaylistId.clear(); // album is not a removable-from playlist
     const QByteArray id = a.id.toUtf8();
@@ -1729,7 +1727,7 @@ void MainWindow::runSearch() {
                             110, 110, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
                     });
             }
-            statusBar()->showMessage("Search complete", 3000);
+            statusBar()->clearMessage();
         }, Qt::QueuedConnection);
     });
 }
@@ -1807,7 +1805,7 @@ void MainWindow::likeTrack(const QString &trackId, bool like) {
 void MainWindow::addTrackToPlaylist(const Track &t) {
     if (!m_loggedIn || t.id.isEmpty())
         return;
-    statusBar()->showMessage("Loading playlists…");
+    statusBar()->showMessage("Loading…");
     QtConcurrent::run([this, t] {
         QVector<Playlist> ps;
         const QJsonObject obj =
@@ -2260,7 +2258,7 @@ void MainWindow::runPodcastSearch() {
     const QString q = m_podcastSearchEdit->text().trimmed();
     if (q.isEmpty())
         return;
-    statusBar()->showMessage("Searching podcasts…");
+    statusBar()->showMessage("Searching…");
     const QByteArray qb = q.toUtf8();
     QtConcurrent::run([this, qb] {
         const QByteArray j = takeJson(DZSearchPodcastsJSON(cstr(qb)));
@@ -2286,7 +2284,7 @@ void MainWindow::runPodcastSearch() {
                     });
             }
             statusBar()->showMessage(
-                QString("Found %1 podcasts").arg(m_podcasts.size()), 3000);
+                QString("%1 podcasts").arg(m_podcasts.size()), 3000);
         }, Qt::QueuedConnection);
     });
 }
@@ -2297,8 +2295,8 @@ void MainWindow::openPodcast(const Podcast &p) {
     m_stack->setCurrentIndex(8); // podcast episodes page
     m_episodes.clear();
     m_episodeList->clear();
-    m_episodeList->addItem(new QListWidgetItem(QStringLiteral("Loading episodes…")));
-    statusBar()->showMessage("Loading episodes…");
+    m_episodeList->addItem(new QListWidgetItem(QStringLiteral("Loading…")));
+    statusBar()->showMessage("Loading…");
     const QByteArray idb = p.id.toUtf8();
     QtConcurrent::run([this, idb] {
         const QByteArray j = takeJson(DZPodcastEpisodesJSON(cstr(idb)));
@@ -2431,7 +2429,7 @@ void MainWindow::loadLyrics(const QString &trackId, const QString &title) {
     m_lyricsActiveRow = -1;
     m_lyricsIsSynced  = false;
     m_lyricsShownId.clear();
-    m_lyricsList->addItem(new QListWidgetItem(QStringLiteral("Loading lyrics…")));
+    m_lyricsList->addItem(new QListWidgetItem(QStringLiteral("Loading…")));
 
     const int gen = ++m_lyricsGen;
     const QByteArray idb = trackId.toUtf8();
@@ -2560,7 +2558,7 @@ void MainWindow::openArtist(const QString &artistId) {
         return;
     rememberReturnPage();
     m_stack->setCurrentIndex(5);
-    statusBar()->showMessage(QStringLiteral("Loading artist…"));
+    statusBar()->showMessage(QStringLiteral("Loading…"));
 
     // Reset the page to a loading state.
     m_artistName->setText(QStringLiteral("Loading…"));
@@ -2590,7 +2588,7 @@ void MainWindow::renderArtist(const QByteArray &json, int gen) {
     const QJsonObject obj = QJsonDocument::fromJson(json).object();
     if (obj.contains("error")) {
         m_artistName->setText(QStringLiteral("Artist unavailable"));
-        statusBar()->showMessage(QStringLiteral("Could not load artist"), 3000);
+        statusBar()->showMessage(QStringLiteral("Couldn't load artist"), 3000);
         return;
     }
 
@@ -2895,7 +2893,7 @@ void MainWindow::showConnectPicker(const QVector<ConnectDevice> &devices,
         }
     }
     if (devices.isEmpty()) {
-        auto *none = new QListWidgetItem(QStringLiteral("No devices found on your network."));
+        auto *none = new QListWidgetItem(QStringLiteral("No devices found."));
         none->setFlags(Qt::NoItemFlags); // a hint, not a selectable row
         list->addItem(none);
     }
