@@ -8,7 +8,7 @@ from memory (MP3, or FLAC on HiFi). Your ARL stays on your machine and only goes
 to Deezer in the requests OpenDeezer makes for you.
 
 One Go engine handles the whole streaming path (login, decrypt, decode,
-playback). Seven native front-ends sit on top of it. By **Cycl0o0**.
+playback). Eight native front-ends sit on top of it. By **Cycl0o0**.
 
 ## Clients
 
@@ -21,6 +21,7 @@ playback). Seven native front-ends sit on top of it. By **Cycl0o0**.
 | **KDE** | Qt6 Widgets · Breeze | x86_64 · aarch64 `gui/kde` |
 | **Windows** | WinUI 3 · C# / .NET 8 · Fluent | x64 `gui/windows` |
 | **Android** | Kotlin · Jetpack Compose | arm64/arm/x86_64 (gomobile AAR) `gui/android` |
+| **iOS** | SwiftUI · Liquid Glass (iOS 26) | iPhone (gomobile xcframework) `gui/ios` |
 
 The **unified Linux** client is a single `opendeezer` command that picks the
 native toolkit for your desktop (Qt/Breeze on KDE-family, GTK4/libadwaita
@@ -43,8 +44,7 @@ Prebuilt binaries for everything are on the [Releases](../../releases) page.
 - **Like / unlike** tracks; **add to playlist**; **create / rename / delete** playlists.
 
 **Playback**
-- **Quality tiers** — Normal (MP3 128), High (MP3 320), **HiFi (FLAC lossless)**;
-  HiFi auto-falls-back to MP3 when your account or the track isn't entitled.
+- **Quality tiers** — Normal (MP3 128), High (MP3 320), **HiFi (FLAC lossless)**.
 - **Gapless** transitions, **crossfade**, **ReplayGain** loudness normalization.
 - **Output-device selection** (powered by the malgo/miniaudio backend).
 - Shuffle, repeat (off/all/one), seek, volume; **resume** the last track on launch.
@@ -57,6 +57,12 @@ Prebuilt binaries for everything are on the [Releases](../../releases) page.
   captured automatically (manual ARL entry still available).
 - Shows your **account tier** after login; a clear "ARL expired" re-login prompt.
 - **Background playback** / close-to-tray in the GUIs.
+- **Home screen** — a discovery landing (greeting, quick picks, top tracks, your
+  playlists) instead of opening straight to Liked Songs.
+- **Update check** — each client checks GitHub on launch and shows a dismissible
+  "update available" notice (opt-in "Check for updates" too); never auto-installs.
+- **Remote control in Settings** — the control API / phone remote is now
+  configurable in-app (enable, LAN, token), not only via env/config file.
 - Album art (truecolor half-blocks in the TUI; native everywhere else).
 - TUI extras: queue view, lyrics, help screen, themes, vim keys, resume.
 - Settings persisted to `~/.config/opendeezer/`; ARL stays local.
@@ -101,6 +107,10 @@ access to your account.
   runtime (preinstalled on Windows 11) for the login web view.
 - **Android**: Android 7.0+ (API 24). Building needs JDK 17, the Android SDK +
   NDK, and gomobile.
+- **iOS**: iPhone on iOS 17+ (Liquid Glass on iOS 26). Building needs Xcode,
+  gomobile and xcodegen (`gui/ios/build.sh`); Liquid Glass falls back to a
+  material on iOS < 26. Releases ship an **unsigned** `.ipa` — sideload with
+  AltStore/Sideloadly, or set your own Team in Xcode and run.
 - TUI album art needs a 256-color or truecolor terminal.
 
 ## TUI controls
@@ -401,8 +411,7 @@ affiliated with Deezer.
 
 **Does it support HiFi / FLAC?**
 Yes — if your account is HiFi-entitled. Pick HiFi in settings (or press `h` in
-the TUI); it streams lossless FLAC and falls back to MP3 when a track or account
-isn't entitled.
+the TUI); it streams lossless FLAC.
 
 **Why not just use the official app?**
 Mostly because it's a reverse-engineering project and a learning exercise. You

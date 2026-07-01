@@ -6,6 +6,10 @@
 //   * close-to-tray  — keep the engine playing in the background on window close
 // The dialog only edits + persists values; it emits the two signals below on
 // accept so MainWindow can apply them (DZSetQuality / tray behaviour).
+//
+// The Remote control group is different: it talks to the engine directly
+// (DZControlConfigJSON / DZSetControlConfig / DZWebRemote*) and applies on
+// every change rather than waiting for OK, since it's toggling a live server.
 #pragma once
 
 #include <QDialog>
@@ -15,6 +19,9 @@
 QT_BEGIN_NAMESPACE
 class QComboBox;
 class QCheckBox;
+class QLineEdit;
+class QLabel;
+class QPushButton;
 QT_END_NAMESPACE
 
 // One output device row, parsed from DZAudioDevicesJSON by MainWindow and passed
@@ -54,13 +61,28 @@ signals:
 
 private:
     void save();
+    void applyControlConfig(); // pushes enable/LAN/token to the engine live
+    void checkForUpdates();    // on-demand DZCheckUpdateJSON; shows the result inline
 
     QString    m_iniPath;
     QString    m_initialDevice;            // to avoid re-applying an unchanged device
-    QComboBox *m_quality    = nullptr;
-    QCheckBox *m_replayGain = nullptr;
-    QCheckBox *m_tray       = nullptr;
-    QComboBox *m_device     = nullptr;
-    QCheckBox *m_gapless    = nullptr;
-    QComboBox *m_crossfade  = nullptr;
+    QComboBox *m_quality     = nullptr;
+    QCheckBox *m_replayGain  = nullptr;
+    QCheckBox *m_tray        = nullptr;
+    QComboBox *m_device      = nullptr;
+    QCheckBox *m_gapless     = nullptr;
+    QComboBox *m_crossfade   = nullptr;
+
+    // ---- About / manual update check (v1.5.1) ----
+    QPushButton *m_checkUpdatesBtn   = nullptr;
+    QLabel      *m_updateResult      = nullptr;
+    QPushButton *m_updateDownloadBtn = nullptr;
+    QString      m_updateUrl;                 // release page from the last successful check
+
+    // Remote control (control API + phone remote) — read from / applied to the
+    // engine directly, not persisted through m_iniPath.
+    QCheckBox *m_ctrlEnable   = nullptr;
+    QCheckBox *m_ctrlLan      = nullptr;
+    QLineEdit *m_ctrlToken    = nullptr;
+    QCheckBox *m_phoneRemote  = nullptr;
 };

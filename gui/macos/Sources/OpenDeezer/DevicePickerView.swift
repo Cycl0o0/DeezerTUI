@@ -25,7 +25,7 @@ struct DevicePickerView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Connect to a Device")
                     .font(.system(size: 16, weight: .bold)).foregroundStyle(DZ.textPri)
-                Text("Play on another OpenDeezer device on your network")
+                Text("Play on another device on your network")
                     .font(.system(size: 12)).foregroundStyle(DZ.textSec).lineLimit(1)
             }
             Spacer()

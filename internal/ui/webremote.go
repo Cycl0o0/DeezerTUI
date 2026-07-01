@@ -6,9 +6,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Cycl0o0/OpenDeezer/internal/config"
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
-	qrcode "github.com/skip2/go-qrcode"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 // webRemoteMsg is the result of enabling or disabling the phone web remote.
@@ -179,7 +181,53 @@ func lanIPv4() string {
 
 // handleWebRemoteKey drives the Web Remote screen.
 func (m *Model) handleWebRemoteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.ctrlEditToken {
+		switch msg.String() {
+		case "esc":
+			m.ctrlEditToken = false
+			m.search.Blur()
+			m.search.EchoMode = textinput.EchoNormal
+			m.status = ""
+			return m, nil
+		case "enter":
+			tok := strings.TrimSpace(m.search.Value())
+			m.ctrlEditToken = false
+			m.search.Blur()
+			m.search.EchoMode = textinput.EchoNormal
+			if err := config.SaveControlToken(tok); err != nil {
+				m.status = "Couldn't save token: " + err.Error()
+			} else if tok == "" {
+				m.status = "Token cleared — restart to apply"
+			} else {
+				m.status = "Token saved — restart to apply"
+			}
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.search, cmd = m.search.Update(msg)
+		return m, cmd
+	}
+
 	switch msg.String() {
+	case "a":
+		cfg := LoadControl()
+		enable := !cfg.Enabled
+		if err := config.SaveControlEnabled(enable, cfg.Addr); err != nil {
+			m.status = "Couldn't save: " + err.Error()
+		} else if enable {
+			m.status = "Control API on (" + cfg.Addr + ") — restart to apply"
+		} else {
+			m.status = "Control API off — restart to apply"
+		}
+		return m, nil
+	case "t":
+		cfg := LoadControl()
+		m.search.SetValue(cfg.Token)
+		m.search.EchoMode = textinput.EchoPassword
+		m.search.Focus()
+		m.ctrlEditToken = true
+		m.status = ""
+		return m, nil
 	case "esc", "backspace":
 		m.screen = screenMenu
 		m.list.Title = "OpenDeezer"
@@ -230,7 +278,6 @@ func (m *Model) webRemoteView() string {
 			"",
 			dim.Render("Press enter to enable. Your phone must be on the same Wi-Fi."),
 			"",
-			dim.Render("enter enable · esc back · q quit"),
 		)
 	} else {
 		lines = append(lines,
@@ -244,8 +291,39 @@ func (m *Model) webRemoteView() string {
 			lines = append(lines, strings.Split(strings.TrimRight(m.webRemoteQR, "\n"), "\n")...)
 			lines = append(lines, "")
 		}
-		lines = append(lines, dim.Render("enter disable · esc back · q quit"))
 	}
+
+	// Control API: the persisted setting used for the remote-control feature and
+	// MCP, separate from (but shareable with) the ad-hoc pairing above.
+	cfg := LoadControl()
+	apiStatus := "off"
+	if cfg.Enabled {
+		apiStatus = "on · " + cfg.Addr
+	}
+	tokenStatus := "not set"
+	if cfg.Token != "" {
+		tokenStatus = "set"
+	}
+	lines = append(lines,
+		dim.Render("Control API"),
+		"  Status: "+apiStatus,
+		"  Token:  "+tokenStatus,
+		"",
+	)
+
+	if m.ctrlEditToken {
+		lines = append(lines,
+			"Token: "+m.search.View(),
+			dim.Render("enter save · esc cancel"),
+		)
+	} else {
+		toggle := "enter enable"
+		if m.webRemoteActive {
+			toggle = "enter disable"
+		}
+		lines = append(lines, dim.Render(toggle+" · a control API on/off · t set token · esc back · q quit"))
+	}
+
 	if m.status != "" {
 		lines = append(lines, "", statusSty.Render(m.status))
 	}

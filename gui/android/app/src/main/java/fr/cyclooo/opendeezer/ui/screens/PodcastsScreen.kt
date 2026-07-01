@@ -90,7 +90,7 @@ fun PodcastsScreen(onBack: () -> Unit, onOpen: (Podcast) -> Unit) {
                     loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
-                    query.isBlank() -> CenteredMessage("Find a podcast to listen to.")
+                    query.isBlank() -> CenteredMessage("Search Deezer's podcasts.")
                     results.isEmpty() -> CenteredMessage("No shows found.")
                     else -> LazyColumn(Modifier.fillMaxSize()) {
                         items(results, key = { it.id }) { p ->

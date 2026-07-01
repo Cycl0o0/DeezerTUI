@@ -13,7 +13,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"unsafe"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -21,6 +24,100 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/config"
 	"github.com/Cycl0o0/OpenDeezer/internal/control"
 )
+
+// DZControlConfigJSON returns the current remote-control settings for the
+// Settings UI: {enabled, addr, token, lan, running}. Lets a GUI show the same
+// values env vars / config files provide, so they become editable in-app.
+//
+//export DZControlConfigJSON
+func DZControlConfigJSON() *C.char {
+	cfg := config.LoadControl()
+	mu.Lock()
+	running := ctrlSrv != nil
+	addr := cfg.Addr
+	if running {
+		addr = ctrlSrv.Addr()
+	}
+	mu.Unlock()
+	if addr == "" {
+		addr = "127.0.0.1:7654"
+	}
+	return jsonStr(map[string]any{
+		"enabled": cfg.Enabled || running,
+		"addr":    addr,
+		"token":   cfg.Token,
+		"lan":     !config.IsLoopbackAddr(addr),
+		"running": running,
+	}, nil)
+}
+
+// resolveControlAddr turns a UI address hint into a bindable host:port.
+func resolveControlAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	switch {
+	case addr == "" || addr == "1" || addr == "on" || addr == "true":
+		return "127.0.0.1:7654"
+	case strings.HasPrefix(addr, ":"):
+		return "0.0.0.0" + addr
+	default:
+		return addr
+	}
+}
+
+// DZSetControlConfig persists the remote-control settings to the config files the
+// engine reads at startup (~/.config/opendeezer/{control.txt,control-token.txt})
+// AND applies them live: (re)starts the control server when enabled (LAN binds
+// require same-account auth when no token is set), stops it when disabled.
+//
+//export DZSetControlConfig
+func DZSetControlConfig(enabled C.int, addr *C.char, token *C.char) {
+	on := enabled != 0
+	a := strings.TrimSpace(C.GoString(addr))
+	tok := strings.TrimSpace(C.GoString(token))
+
+	// Persist for next launch (same files env/config provide today).
+	if base, err := os.UserConfigDir(); err == nil {
+		dir := filepath.Join(base, "opendeezer")
+		_ = os.MkdirAll(dir, 0o755)
+		val := ""
+		if on {
+			if a != "" {
+				val = a
+			} else {
+				val = "1"
+			}
+		}
+		_ = os.WriteFile(filepath.Join(dir, "control.txt"), []byte(val), 0o600)
+		_ = os.WriteFile(filepath.Join(dir, "control-token.txt"), []byte(tok), 0o600)
+	}
+
+	// Apply live: tear down any running server, then start fresh if enabled.
+	mu.Lock()
+	old := ctrlSrv
+	ctrlSrv = nil
+	c := client
+	mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	if !on {
+		return
+	}
+	bind := resolveControlAddr(a)
+	id, dev := clientInfo()
+	srv := control.New(
+		control.Config{Addr: bind, Token: tok, SameAccountOnly: !config.IsLoopbackAddr(bind) && tok == ""},
+		engineState, engineAccount, engineCommands(), c,
+	)
+	srv.SetVersion(coreVersion)
+	srv.SetClientInfo(id, dev)
+	if err := srv.Start(); err != nil {
+		return
+	}
+	mu.Lock()
+	ctrlSrv = srv
+	mu.Unlock()
+}
 
 // DZWebRemoteSetEnabled enables (on!=0) or disables (on==0) the phone web
 // remote. When enabling, the control server is started (or rebound) on a

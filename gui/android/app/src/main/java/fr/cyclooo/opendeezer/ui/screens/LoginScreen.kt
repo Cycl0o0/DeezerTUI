@@ -107,8 +107,8 @@ fun LoginScreen(
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("Use the web sign-in instead") }
                 Text(
-                    "The ARL is a long token from your Deezer session cookie. " +
-                        "Web sign-in reads it for you automatically.",
+                    "A long token from your Deezer session cookie. " +
+                        "Web sign-in reads it automatically.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

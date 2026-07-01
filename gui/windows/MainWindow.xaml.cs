@@ -81,6 +81,7 @@ public sealed partial class MainWindow : Window
         SetupTray();
         AppWindow.Closing += OnClosing;
         StartLogin();
+        StartBackgroundUpdateCheck(); // fire-and-forget: never blocks startup
     }
 
     // ---- grid helpers --------------------------------------------------------
@@ -92,21 +93,68 @@ public sealed partial class MainWindow : Window
     // ---- UI construction -----------------------------------------------------
     private void BuildUi()
     {
-        // RootGrid is the window content (from MainWindow.xaml): row0 content, row1 bar.
+        // RootGrid is the window content (from MainWindow.xaml): row0 the (normally
+        // collapsed) update banner, row1 content, row2 the transport bar.
+        RootGrid.RowDefinitions.Add(RowAuto());
         RootGrid.RowDefinitions.Add(RowStar());
         RootGrid.RowDefinitions.Add(RowAuto());
 
+        var updateBar = BuildUpdateBar();
+        Grid.SetRow(updateBar, 0);
+        RootGrid.Children.Add(updateBar);
+
         BuildNav();
         BuildPages();
-        Grid.SetRow(_nav, 0);
+        Grid.SetRow(_nav, 1);
         RootGrid.Children.Add(_nav);
 
         var bar = BuildTransport();
-        Grid.SetRow(bar, 1);
+        Grid.SetRow(bar, 2);
         RootGrid.Children.Add(bar);
 
         _nav.Content = _homePage; // show the (empty) Home page until login fills it
         _nav.Header = "Home";
+    }
+
+    // Small dismissible "a newer version is available" banner above the nav.
+    // IsOpen starts false, which collapses the Auto row to zero height, so it
+    // never reserves space (and never blocks startup) unless an update is found.
+    private InfoBar BuildUpdateBar()
+    {
+        var downloadBtn = new Button { Content = "Download" };
+        downloadBtn.Click += async (_, _) =>
+        {
+            if (string.IsNullOrEmpty(_updateUrl)) return;
+            try { await Launcher.LaunchUriAsync(new Uri(_updateUrl)); } catch { }
+        };
+        _updateBar = new InfoBar
+        {
+            Severity = InfoBarSeverity.Informational,
+            IsOpen = false,
+            IsClosable = true,
+            ActionButton = downloadBtn,
+        };
+        return _updateBar;
+    }
+
+    // Best-effort, silent, off-thread GitHub release check. Never blocks startup
+    // and never surfaces a network/parse failure to the user.
+    private async void StartBackgroundUpdateCheck()
+    {
+        UpdateInfo info;
+        try { info = await Task.Run(() => DeezerCore.CheckUpdate()); }
+        catch { return; }
+        if (info.HasUpdate) ShowUpdateNotice(info);
+    }
+
+    private void ShowUpdateNotice(UpdateInfo info)
+    {
+        _updateUrl = info.Url;
+        _updateBar.Title = "OpenDeezer " + info.Latest + " available";
+        _updateBar.Message = string.IsNullOrEmpty(info.Notes)
+            ? "A newer version is available for download."
+            : (info.Notes.Length > 240 ? info.Notes[..240] + "…" : info.Notes);
+        _updateBar.IsOpen = true;
     }
 
     private NavigationViewItem NavItem(string text, Symbol sym, string tag) =>
@@ -799,7 +847,7 @@ public sealed partial class MainWindow : Window
         });
         sp.Children.Add(new TextBlock
         {
-            Text = "Sorry — your account isn't supported",
+            Text = "Premium required",
             FontSize = 26,
             FontWeight = FontWeights.SemiBold,
             TextWrapping = TextWrapping.Wrap,
@@ -813,9 +861,7 @@ public sealed partial class MainWindow : Window
             TextAlignment = TextAlignment.Center,
             Opacity = 0.85,
             HorizontalAlignment = HorizontalAlignment.Center,
-            Text = "OpenDeezer needs a Deezer Premium subscription to stream. " +
-                   "Your account: " + offer + ". " +
-                   "Subscribe at deezer.com, then restart OpenDeezer.",
+            Text = "Your account (" + offer + ") isn't Premium. Subscribe at deezer.com, then restart OpenDeezer.",
         });
         var quit = new Button { Content = "Quit", HorizontalAlignment = HorizontalAlignment.Center };
         quit.Click += (_, _) => QuitApp();
@@ -836,9 +882,7 @@ public sealed partial class MainWindow : Window
             Content = new TextBlock
             {
                 TextWrapping = TextWrapping.Wrap,
-                Text = "Log in with your Deezer account in the in-app browser — OpenDeezer " +
-                       "captures the login automatically, so you never have to copy an ARL by " +
-                       "hand. (Advanced: you can still paste an ARL manually.)",
+                Text = "Choose how you'd like to sign in.",
             },
             PrimaryButtonText = "Log in with Deezer",
             SecondaryButtonText = "Enter ARL manually",
@@ -2003,13 +2047,26 @@ public sealed partial class MainWindow : Window
     private async void ShowSettings()
     {
         // Output devices + current engine audio state read off the UI thread.
-        var (devJson, curDev, curGapless, curCrossfade) = await Task.Run(() =>
+        var (devJson, curDev, curGapless, curCrossfade, ctrlJson) = await Task.Run(() =>
         {
             string dj = DeezerCore.TakeJson(DeezerCore.DZAudioDevicesJSON());
             string cd = DeezerCore.CurrentAudioDevice();
-            return (dj, cd, DeezerCore.DZGapless() != 0, DeezerCore.DZCrossfadeMS());
+            string cj = DeezerCore.ControlConfig();
+            return (dj, cd, DeezerCore.DZGapless() != 0, DeezerCore.DZCrossfadeMS(), cj);
         });
         var devices = Wire.ParseDevices(devJson);
+
+        bool ctrlEnabled = false, ctrlLan = false;
+        string ctrlToken = "";
+        try
+        {
+            using var ctrlDoc = JsonDocument.Parse(string.IsNullOrEmpty(ctrlJson) ? "{}" : ctrlJson);
+            var co = ctrlDoc.RootElement;
+            ctrlEnabled = co.Bool("enabled");
+            ctrlLan = co.Bool("lan");
+            ctrlToken = co.Str("token");
+        }
+        catch { }
 
         var sp = new StackPanel { Spacing = 18, MinWidth = 360 };
 
@@ -2017,7 +2074,7 @@ public sealed partial class MainWindow : Window
         var quality = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
         quality.Items.Add("Normal — MP3 128 kbps");
         quality.Items.Add("High — MP3 320 kbps");
-        quality.Items.Add("HiFi — FLAC lossless (falls back to MP3)");
+        quality.Items.Add("HiFi — FLAC lossless");
         quality.SelectedIndex = _settings.Quality;
         var qsec = new StackPanel { Spacing = 4 };
         qsec.Children.Add(new TextBlock { Text = "Audio quality", FontWeight = FontWeights.SemiBold });
@@ -2097,12 +2154,99 @@ public sealed partial class MainWindow : Window
         tsec.Children.Add(new TextBlock { Text = "Background playback", FontWeight = FontWeights.SemiBold });
         tsec.Children.Add(tray);
 
+        // Remote control (control API / phone remote): enable, LAN reachability, token.
+        // Applies live -- every change is pushed straight to the engine, not gated
+        // behind the dialog's Save button.
+        var ctrlEnableSwitch = new ToggleSwitch
+        {
+            OnContent = "Remote control on",
+            OffContent = "Remote control off",
+            IsOn = ctrlEnabled,
+        };
+        var ctrlLanSwitch = new ToggleSwitch
+        {
+            OnContent = "Reachable on the local network",
+            OffContent = "This computer only",
+            IsOn = ctrlLan,
+            IsEnabled = ctrlEnabled,
+        };
+        var ctrlTokenBox = new TextBox
+        {
+            PlaceholderText = "Access token (optional)",
+            Text = ctrlToken,
+            IsEnabled = ctrlEnabled,
+        };
+        async void ApplyControlConfig()
+        {
+            bool on = ctrlEnableSwitch.IsOn;
+            string addr = ctrlLanSwitch.IsOn ? ":7654" : "";
+            string token = ctrlTokenBox.Text ?? "";
+            await Task.Run(() => DeezerCore.DZSetControlConfig(on ? 1 : 0, addr, token));
+        }
+        ctrlEnableSwitch.Toggled += (_, _) =>
+        {
+            ctrlLanSwitch.IsEnabled = ctrlEnableSwitch.IsOn;
+            ctrlTokenBox.IsEnabled = ctrlEnableSwitch.IsOn;
+            ApplyControlConfig();
+        };
+        ctrlLanSwitch.Toggled += (_, _) => ApplyControlConfig();
+        ctrlTokenBox.LostFocus += (_, _) => ApplyControlConfig();
+        var rcsec = new StackPanel { Spacing = 4 };
+        rcsec.Children.Add(new TextBlock { Text = "Remote control", FontWeight = FontWeights.SemiBold });
+        rcsec.Children.Add(new TextBlock { Text = "Control playback from another device on your network.", Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
+        rcsec.Children.Add(ctrlEnableSwitch);
+        rcsec.Children.Add(ctrlLanSwitch);
+        rcsec.Children.Add(ctrlTokenBox);
+
+        // Updates: on-demand GitHub release check (never downloads/installs anything).
+        var updStatus = new TextBlock { Text = "Check GitHub for a newer release.", Opacity = 0.8, TextWrapping = TextWrapping.Wrap };
+        var updBtn = new Button { Content = "Check for updates" };
+        var updDownloadBtn = new Button { Content = "Download", Visibility = Visibility.Collapsed };
+        string updCheckUrl = "";
+        updBtn.Click += async (_, _) =>
+        {
+            updBtn.IsEnabled = false;
+            updStatus.Text = "Checking…";
+            UpdateInfo info;
+            try { info = await Task.Run(() => DeezerCore.CheckUpdate()); }
+            catch { info = new UpdateInfo(); }
+            if (info.HasUpdate)
+            {
+                updStatus.Text = "v" + info.Latest + " available (you have v" + info.Current + ").";
+                updCheckUrl = info.Url;
+                updDownloadBtn.Visibility = Visibility.Visible;
+                ShowUpdateNotice(info); // also surface the dismissible banner for after the dialog closes
+            }
+            else
+            {
+                updStatus.Text = string.IsNullOrEmpty(info.Latest)
+                    ? "Could not check for updates. Try again later."
+                    : "You're up to date (v" + info.Current + ").";
+                updDownloadBtn.Visibility = Visibility.Collapsed;
+            }
+            updBtn.IsEnabled = true;
+        };
+        updDownloadBtn.Click += async (_, _) =>
+        {
+            if (string.IsNullOrEmpty(updCheckUrl)) return;
+            try { await Launcher.LaunchUriAsync(new Uri(updCheckUrl)); } catch { }
+        };
+        var updRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        updRow.Children.Add(updBtn);
+        updRow.Children.Add(updDownloadBtn);
+        var usec = new StackPanel { Spacing = 4 };
+        usec.Children.Add(new TextBlock { Text = "Updates", FontWeight = FontWeights.SemiBold });
+        usec.Children.Add(updStatus);
+        usec.Children.Add(updRow);
+
         sp.Children.Add(qsec);
         sp.Children.Add(asec);
         sp.Children.Add(gsec);
         sp.Children.Add(csec);
         sp.Children.Add(rsec);
         sp.Children.Add(tsec);
+        sp.Children.Add(rcsec);
+        sp.Children.Add(usec);
 
         var dlg = new ContentDialog
         {
@@ -2267,7 +2411,7 @@ public sealed partial class MainWindow : Window
     private async void ShowAbout()
     {
         var sp = new StackPanel { Spacing = 8 };
-        sp.Children.Add(new TextBlock { Text = "OpenDeezer 1.5.0", FontSize = 22, FontWeight = FontWeights.SemiBold, Foreground = _accent });
+        sp.Children.Add(new TextBlock { Text = "OpenDeezer 1.5.1", FontSize = 22, FontWeight = FontWeights.SemiBold, Foreground = _accent });
         sp.Children.Add(new TextBlock { Text = "An open source reimplementation of Deezer.", TextWrapping = TextWrapping.Wrap });
         sp.Children.Add(new TextBlock
         {
@@ -2293,6 +2437,10 @@ public sealed partial class MainWindow : Window
     private readonly SolidColorBrush _accent;
     private readonly Random _rng = new();
     private DispatcherQueueTimer _timer = null!;
+
+    // Update check (see BuildUpdateBar / StartBackgroundUpdateCheck / ShowSettings).
+    private InfoBar _updateBar = null!;
+    private string _updateUrl = "";
 
     private NavigationView _nav = null!;
     private NavigationViewItem _homeItem = null!, _likedItem = null!, _flowItem = null!, _playlistsItem = null!, _chartsItem = null!,

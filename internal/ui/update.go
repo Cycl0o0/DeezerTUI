@@ -25,9 +25,9 @@ func (m *Model) menuRows() []list.Item {
 		})
 	}
 	rows = append(rows,
-		row{kind: rowMenu, title: "❤  Liked Songs", desc: "your favorite tracks", action: actLiked},
-		row{kind: rowMenu, title: "≡  My Playlists", desc: "playlists you own", action: actPlaylists},
-		row{kind: rowMenu, title: "⚡ Flow", desc: "your personalized stream", action: actFlow},
+		row{kind: rowMenu, title: "❤  Liked Songs", desc: "favorites", action: actLiked},
+		row{kind: rowMenu, title: "≡  My Playlists", desc: "your playlists", action: actPlaylists},
+		row{kind: rowMenu, title: "⚡ Flow", desc: "non-stop mix", action: actFlow},
 		row{kind: rowMenu, title: "📈 Charts", desc: "top tracks, albums & artists", action: actCharts},
 		row{kind: rowMenu, title: "🎙 Podcasts", desc: "search shows & episodes", action: actPodcasts},
 		row{kind: rowMenu, title: "🔍 Search", desc: "tracks, albums, artists, playlists", action: actSearch},
@@ -241,6 +241,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.status = "Error: " + msg.err.Error()
+		return m, nil
+
+	case updateCheckMsg:
+		m.updateChecking = false
+		m.updateChecked = true
+		if msg.err == nil {
+			m.updateInfo = msg.info
+		}
+		// The silent startup check never touches m.status — the footer
+		// notice (see footer()) is enough when an update exists. Only a
+		// manual re-check (About screen) sets "Checking…" first, so only
+		// that path gets a status reply here.
+		if m.status == "Checking for updates…" {
+			switch {
+			case msg.err != nil:
+				m.status = "Update check failed (network?)"
+			case msg.info.HasUpdate:
+				m.status = ""
+			default:
+				m.status = "You're on the latest version."
+			}
+		}
 		return m, nil
 
 	case tickMsg:
@@ -490,7 +512,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.loading = true
 			if m.searchPodcast {
-				m.status = "Searching podcasts…"
+				m.status = "Searching…"
 				return m, m.podcastSearchCmd(q)
 			}
 			m.status = "Searching…"
@@ -566,6 +588,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "u":
+		// On the About screen, "u" is a manual "check for updates" instead
+		// of the usual queue shortcut (pointless there anyway).
+		if m.screen == screenCredits {
+			if m.updateChecking {
+				return m, nil
+			}
+			m.updateChecking = true
+			m.status = "Checking for updates…"
+			return m, m.updateCheckCmd()
+		}
 		m.toggleScreen(screenQueue)
 		return m, nil
 	case "t":
@@ -584,7 +616,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		// Output device picker.
 		m.loading = true
-		m.status = "Loading devices…"
+		m.status = "Loading…"
 		return m, m.devicesCmd()
 	case "x":
 		// Cycle crossfade: 0 → 3s → 6s → 12s → 0.
@@ -622,7 +654,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.screen == screenLyrics && (m.lyrics == nil || m.lyricsTrack != t.ID) {
 			m.lyricsTrack = t.ID
 			m.loading = true
-			m.status = "Loading lyrics…"
+			m.status = "Loading…"
 			return m, m.lyricsCmd(t)
 		}
 		return m, nil
@@ -644,7 +676,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		_ = SaveQuality(q)
 		switch q {
 		case 2:
-			m.status = "Audio quality: HiFi (FLAC, falls back to MP3)"
+			m.status = "Audio quality: HiFi (FLAC)"
 		case 1:
 			m.status = "Audio quality: High (MP3 320)"
 		default:
@@ -668,6 +700,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "i":
 		m.toggleScreen(screenCredits)
+		return m, nil
+	case "U":
+		// Open the available update's release page. Never downloads or
+		// installs anything itself.
+		if m.updateInfo.HasUpdate && m.updateInfo.URL != "" {
+			openInBrowser(m.updateInfo.URL)
+			m.updateDismissed = true
+		}
+		return m, nil
+	case "X":
+		// Dismiss the footer's "update available" notice for this session.
+		m.updateDismissed = true
 		return m, nil
 	case "esc", "backspace":
 		switch m.screen {
@@ -699,19 +743,19 @@ func (m *Model) activate() (tea.Model, tea.Cmd) {
 	case rowMenu:
 		switch it.action {
 		case actLiked:
-			m.status = "Loading liked songs…"
+			m.status = "Loading…"
 			m.loading = true
 			return m, m.favoritesCmd()
 		case actPlaylists:
-			m.status = "Loading playlists…"
+			m.status = "Loading…"
 			m.loading = true
 			return m, m.playlistsCmd()
 		case actCharts:
-			m.status = "Loading charts…"
+			m.status = "Loading…"
 			m.loading = true
 			return m, m.chartsCmd()
 		case actFlow:
-			m.status = "Loading Flow…"
+			m.status = "Loading…"
 			m.loading = true
 			return m, m.flowCmd()
 		case actSearch:
@@ -728,7 +772,7 @@ func (m *Model) activate() (tea.Model, tea.Cmd) {
 			return m, nil
 		case actRemote:
 			m.loading = true
-			m.status = "Scanning for devices…"
+			m.status = "Scanning…"
 			return m, m.discoverDevicesCmd()
 		case actWebRemote:
 			m.screen = screenWebRemote
@@ -761,11 +805,11 @@ func (m *Model) activate() (tea.Model, tea.Cmd) {
 		}
 		return m, m.playCurrent()
 	case rowArtist:
-		m.status = "Loading artist…"
+		m.status = "Loading…"
 		m.loading = true
 		return m, m.artistTopCmd(it.artist)
 	case rowPodcast:
-		m.status = "Loading episodes…"
+		m.status = "Loading…"
 		m.loading = true
 		return m, m.episodesCmd(it.podcast)
 	case rowEpisode:
@@ -788,11 +832,11 @@ func (m *Model) activate() (tea.Model, tea.Cmd) {
 		m.screen = m.prevScreen
 		return m, nil
 	case rowPlaylist:
-		m.status = "Loading playlist…"
+		m.status = "Loading…"
 		m.loading = true
 		return m, m.playlistTracksCmd(it.playlist)
 	case rowAlbum:
-		m.status = "Loading album…"
+		m.status = "Loading…"
 		m.loading = true
 		return m, m.albumTracksCmd(it.album)
 	case rowPeer:

@@ -29,10 +29,11 @@ import (
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
 	"github.com/Cycl0o0/OpenDeezer/internal/discovery"
 	odlog "github.com/Cycl0o0/OpenDeezer/internal/log"
+	"github.com/Cycl0o0/OpenDeezer/internal/update"
 )
 
 // Version is the engine/app version.
-const Version = "1.5.0"
+const Version = "1.5.1"
 
 var (
 	mu       sync.Mutex
@@ -173,6 +174,13 @@ func Init(arl string) bool {
 
 // LoggedIn reports whether Init succeeded.
 func LoggedIn() bool { c := curClient(); return c != nil && c.LoggedIn() }
+
+// CheckUpdate checks GitHub for a newer release; returns JSON
+// {current, latest, hasUpdate, url, notes}.
+func CheckUpdate() string {
+	info, _ := update.Check(Version)
+	return jstr(info, nil)
+}
 
 // ---- account / settings ----
 
@@ -629,7 +637,8 @@ func Fetch(url string) []byte {
 var (
 	servicesOnce sync.Once
 	ctrlSrv      *control.Server
-	clientID     = runtime.GOOS // "android"
+	hostAdv      *discovery.Responder // mDNS advertiser while Connect host is enabled
+	clientID     = runtime.GOOS       // "android"
 	deviceLabel  = "OpenDeezer (Android)"
 )
 
@@ -1018,59 +1027,120 @@ func WebRemoteQRPNG() []byte {
 // mobileEnsureWebRemoteServer ensures the control server is running on a
 // LAN-reachable address and has pairing active.
 func mobileEnsureWebRemoteServer() {
+	if srv := mobileEnsureLANServer(); srv != nil {
+		srv.EnablePairing()
+	}
+}
+
+// mobileStartServer creates + starts a control server on addr with same-account
+// auth, so same-account OpenDeezer devices can control it (Connect host) while
+// the browser phone remote can still pair on top (a valid pairing session is
+// checked before same-account auth). Returns nil on bind failure.
+func mobileStartServer(addr string) *control.Server {
+	s := control.New(
+		control.Config{Addr: addr, SameAccountOnly: true},
+		engineState, engineAccount, engineCommands(), curClient(),
+	)
+	s.SetVersion(Version)
+	s.SetClientInfo(clientID, deviceLabel)
+	if err := s.Start(); err != nil {
+		return nil
+	}
+	return s
+}
+
+// mobileEnsureLANServer returns the control server bound to a LAN-reachable
+// address, starting it (or rebinding a loopback-only server onto all
+// interfaces) as needed. Shared by the phone remote (pairing) and the Connect
+// host (mDNS discovery). A non-loopback server that already exists (e.g. from a
+// config-driven Init) is reused as-is so any configured token/bind is preserved.
+func mobileEnsureLANServer() *control.Server {
 	mu.Lock()
 	srv := ctrlSrv
 	mu.Unlock()
 
-	c := curClient()
-	startNew := func(addr string) *control.Server {
-		s := control.New(
-			control.Config{Addr: addr, WebRemote: true},
-			engineState, engineAccount, engineCommands(), c,
-		)
-		s.SetVersion(Version)
-		s.SetClientInfo(clientID, deviceLabel)
-		if err := s.Start(); err != nil {
-			return nil
-		}
-		return s
+	if srv != nil && !mobileIsLoopback(srv.Addr()) {
+		return srv
 	}
 
+	port := "7654"
 	if srv != nil {
-		// Already running; check if LAN-reachable.
-		if !mobileIsLoopback(srv.Addr()) {
-			srv.EnablePairing()
-			return
+		if _, p, err := net.SplitHostPort(srv.Addr()); err == nil {
+			port = p
 		}
-		// Loopback-only: close and rebind on all interfaces.
-		_, portStr, _ := net.SplitHostPort(srv.Addr())
 		srv.Close()
-		newSrv := startNew("0.0.0.0:" + portStr)
-		if newSrv == nil {
-			newSrv = startNew("0.0.0.0:0")
-		}
-		if newSrv == nil {
-			return
-		}
-		mu.Lock()
-		ctrlSrv = newSrv
-		mu.Unlock()
-		newSrv.EnablePairing()
-		return
 	}
-
-	// No server yet; start one on the default control port.
-	newSrv := startNew("0.0.0.0:7654")
+	newSrv := mobileStartServer("0.0.0.0:" + port)
 	if newSrv == nil {
-		newSrv = startNew("0.0.0.0:0")
+		newSrv = mobileStartServer("0.0.0.0:0")
 	}
 	if newSrv == nil {
-		return
+		return nil
 	}
 	mu.Lock()
 	ctrlSrv = newSrv
 	mu.Unlock()
-	newSrv.EnablePairing()
+	return newSrv
+}
+
+// ---- OpenDeezer Connect host (make this device controllable) ----
+
+// ConnectHostSetEnabled makes this device a discoverable OpenDeezer Connect
+// target on the LAN (on!=0), so other devices signed into the same Deezer
+// account can find it in their device picker and drive its playback; or stops
+// advertising it (on==0). The control server runs on a LAN address with
+// same-account auth. Idempotent.
+func ConnectHostSetEnabled(on int) {
+	if on == 0 {
+		mu.Lock()
+		adv := hostAdv
+		hostAdv = nil
+		mu.Unlock()
+		if adv != nil {
+			adv.Close()
+		}
+		return
+	}
+
+	srv := mobileEnsureLANServer()
+	if srv == nil {
+		return
+	}
+	mu.Lock()
+	already := hostAdv != nil
+	mu.Unlock()
+	if already {
+		return // already advertising
+	}
+	adv, err := discovery.Advertise(advertInfo, mobileSrvPort(srv))
+	if err != nil {
+		return
+	}
+	mu.Lock()
+	hostAdv = adv
+	mu.Unlock()
+}
+
+// ConnectHostInfo returns a JSON string:
+// {"enabled":bool,"addr":"<lanip>:<port>","port":<int>,"name":"<account>"}.
+// addr/name are empty when the Connect host is disabled.
+func ConnectHostInfo() string {
+	mu.Lock()
+	srv := ctrlSrv
+	enabled := hostAdv != nil
+	mu.Unlock()
+	if !enabled || srv == nil {
+		b, _ := json.Marshal(map[string]any{"enabled": false, "addr": "", "port": 0, "name": ""})
+		return string(b)
+	}
+	port := mobileSrvPort(srv)
+	b, _ := json.Marshal(map[string]any{
+		"enabled": true,
+		"addr":    fmt.Sprintf("%s:%d", mobileLANIPv4(), port),
+		"port":    port,
+		"name":    engineAccount().Name,
+	})
+	return string(b)
 }
 
 func mobileSrvPort(srv *control.Server) int {
