@@ -75,7 +75,7 @@ jobs:
           echo "ARTIFACT=$OUT" >> "$GITHUB_ENV"
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ env.ARTIFACT }}
           fail_on_unmatched_files: true
@@ -106,7 +106,7 @@ jobs:
         run: cd gui/macos && ditto -c -k --keepParent OpenDeezer.app ../../OpenDeezer-macos-universal.zip
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: OpenDeezer-macos-universal.zip
 
@@ -134,7 +134,7 @@ jobs:
         run: cp gui/gnome/opendeezer-gnome OpenDeezer-gnome-${{ matrix.arch }}
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: OpenDeezer-gnome-${{ matrix.arch }}
 
@@ -162,7 +162,7 @@ jobs:
         run: cp gui/kde/opendeezer-kde OpenDeezer-kde-${{ matrix.arch }}
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: OpenDeezer-kde-${{ matrix.arch }}
 
@@ -190,7 +190,7 @@ jobs:
         run: tar -C gui/linux/dist -czf OpenDeezer-linux-${{ matrix.arch }}.tar.gz .
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: OpenDeezer-linux-${{ matrix.arch }}.tar.gz
 
@@ -221,7 +221,7 @@ jobs:
           Compress-Archive -Path (Join-Path $exe.Directory.FullName '*') -DestinationPath OpenDeezer-windows-x64.zip
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: OpenDeezer-windows-x64.zip
 
@@ -263,7 +263,7 @@ jobs:
           cp gui/android/app/build/outputs/apk/tv/debug/*.apk OpenDeezer-androidtv.apk
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             OpenDeezer-android.apk
@@ -317,7 +317,7 @@ jobs:
           zip -qry ../../OpenDeezer-ios-unsigned.ipa Payload
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: OpenDeezer-ios-unsigned.ipa
 
@@ -340,6 +340,6 @@ jobs:
           cd dist && sha256sum * > ../SHA256SUMS.txt || true
           cat ../SHA256SUMS.txt || true
       - name: Upload checksums
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: SHA256SUMS.txt
