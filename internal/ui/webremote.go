@@ -51,6 +51,10 @@ func (m *Model) webRemoteEnableCmd() tea.Cmd {
 			SetVolume:     func(v float64) { send(controlCmdMsg{kind: "volume", vol: v}) },
 			PlayTrack:     func(id string) { send(controlCmdMsg{kind: "playtrack", id: id}) },
 			PlayPlaylist:  func(id string) { send(controlCmdMsg{kind: "playplaylist", id: id}) },
+			SetSleepTimer: func(minutes int, eot bool) {
+				send(controlCmdMsg{kind: "sleep", ms: int64(minutes), eot: eot})
+			},
+			CancelSleepTimer: func() { send(controlCmdMsg{kind: "sleepcancel"}) },
 		}
 	}
 

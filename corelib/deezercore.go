@@ -981,6 +981,57 @@ func DZCrossfadeMS() C.int {
 	return C.int(v)
 }
 
+// DZSetSleepTimer arms the sleep timer: pause after `minutes` (with a fade-out),
+// or when the current track ends if endOfTrack != 0 (minutes ignored). Pass
+// minutes <= 0 with endOfTrack == 0 to cancel.
+//
+//export DZSetSleepTimer
+func DZSetSleepTimer(minutes C.int, endOfTrack C.int) {
+	withPlayer(func(p *audio.Player) {
+		p.SetSleepTimer(time.Duration(int(minutes))*time.Minute, endOfTrack != 0)
+	})
+}
+
+// DZCancelSleepTimer disarms the sleep timer.
+//
+//export DZCancelSleepTimer
+func DZCancelSleepTimer() { withPlayer(func(p *audio.Player) { p.CancelSleepTimer() }) }
+
+// DZSleepTimerActive returns 1 if a sleep timer is armed, else 0.
+//
+//export DZSleepTimerActive
+func DZSleepTimerActive() C.int {
+	v := 0
+	withPlayer(func(p *audio.Player) {
+		if p.SleepActive() {
+			v = 1
+		}
+	})
+	return C.int(v)
+}
+
+// DZSleepTimerEndOfTrack returns 1 if the armed timer is end-of-track mode.
+//
+//export DZSleepTimerEndOfTrack
+func DZSleepTimerEndOfTrack() C.int {
+	v := 0
+	withPlayer(func(p *audio.Player) {
+		if p.SleepEndOfTrack() {
+			v = 1
+		}
+	})
+	return C.int(v)
+}
+
+// DZSleepTimerRemainingMS returns milliseconds until the timer fires (0 if none).
+//
+//export DZSleepTimerRemainingMS
+func DZSleepTimerRemainingMS() C.longlong {
+	var v int64
+	withPlayer(func(p *audio.Player) { v = p.SleepRemainingMS() })
+	return C.longlong(v)
+}
+
 // DZPreload resolves a track and preloads it for a gapless/crossfaded
 // transition after the current track ends.
 //

@@ -68,6 +68,20 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
     var replayGain by remember { mutableStateOf(Engine.replayGain()) }
     var gapless by remember { mutableStateOf(Engine.gapless()) }
     var crossfadeSec by remember { mutableFloatStateOf((Engine.crossfadeMs() / 1000f)) }
+    var sleepSelection by remember {
+        mutableIntStateOf(
+            when {
+                Engine.sleepEndOfTrack() -> 5
+                Engine.sleepActive() -> when ((Engine.sleepRemainingMs() / 60_000L).toInt()) {
+                    in 0 until 15 -> 1
+                    in 15 until 30 -> 2
+                    in 30 until 45 -> 3
+                    else -> 4
+                }
+                else -> 0
+            },
+        )
+    }
     var webRemoteEnabled by remember { mutableStateOf(Engine.webRemoteInfo()?.enabled ?: false) }
     var remoteInfo by remember { mutableStateOf<WebRemoteInfo?>(null) }
     var remoteQR by remember { mutableStateOf<ByteArray?>(null) }
@@ -94,6 +108,7 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
     }
 
     val qualityLabels = listOf("Normal", "High", "HiFi")
+    val sleepLabels = listOf("Off", "15", "30", "45", "60", "End")
 
     Scaffold(
         topBar = {
@@ -166,6 +181,31 @@ fun SettingsScreen(account: Account?, onBack: () -> Unit, onLogout: () -> Unit) 
                     steps = 11,
                 )
             }
+
+            HorizontalDivider()
+
+            Text("Sleep timer", style = MaterialTheme.typography.titleMedium)
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                sleepLabels.forEachIndexed { index, label ->
+                    SegmentedButton(
+                        selected = sleepSelection == index,
+                        onClick = {
+                            sleepSelection = index
+                            when (index) {
+                                0 -> Engine.cancelSleepTimer()
+                                sleepLabels.lastIndex -> Engine.setSleepTimer(0, endOfTrack = true)
+                                else -> Engine.setSleepTimer(label.toInt(), endOfTrack = false)
+                            }
+                        },
+                        shape = SegmentedButtonDefaults.itemShape(index, sleepLabels.size),
+                    ) { Text(label) }
+                }
+            }
+            Text(
+                sleepDescription(sleepSelection, sleepLabels),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
             HorizontalDivider()
 
@@ -372,6 +412,12 @@ private fun qualityDescription(level: Int): String = when (level) {
     2 -> "FLAC · lossless"
     1 -> "MP3 · 320 kbps"
     else -> "MP3 · 128 kbps"
+}
+
+private fun sleepDescription(index: Int, labels: List<String>): String = when (index) {
+    0 -> "Playback won't pause automatically"
+    labels.lastIndex -> "Pauses when the current track ends"
+    else -> "Pauses in ${labels[index]} minutes"
 }
 
 @Composable

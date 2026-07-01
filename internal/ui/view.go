@@ -93,7 +93,7 @@ func (m *Model) searchView() string {
 const creditsAuthor = "Cycl0o0"
 
 // Version is the app version, set from main at startup.
-var Version = "1.5.2"
+var Version = "1.6.0"
 
 func (m *Model) creditsView() string {
 	lines := []string{
@@ -215,6 +215,9 @@ func (m *Model) footer() string {
 	}
 
 	content := now + "\n" + bar + "\n" + help
+	if m.player.SleepActive() {
+		content = dim.Render("☾ "+sleepStatus(m.player)) + "\n" + content
+	}
 	if status != "" {
 		content = status + "\n" + content
 	}
@@ -346,6 +349,7 @@ func (m *Model) helpView() string {
 		{"u", "queue view"},
 		{"c", "now playing / cover"},
 		{"t", "cycle theme"},
+		{"T", "sleep timer (off → 15/30/45/60m → end of track)"},
 		{"s", "stop"},
 		{"i", "about / credits (u there: check for updates)"},
 		{"U", "open available update in browser · X dismiss notice"},

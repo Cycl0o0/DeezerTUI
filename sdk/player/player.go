@@ -1,6 +1,8 @@
 package player
 
 import (
+	"time"
+
 	internalaudio "github.com/Cycl0o0/OpenDeezer/internal/audio"
 	sdkdeezer "github.com/Cycl0o0/OpenDeezer/sdk/deezer"
 )
@@ -148,6 +150,26 @@ func (pl *Player) SetCrossfadeMS(ms int) { pl.p.SetCrossfadeMS(ms) }
 
 // CrossfadeMS returns the current crossfade duration in milliseconds.
 func (pl *Player) CrossfadeMS() int { return pl.p.CrossfadeMS() }
+
+// ---- sleep timer ----
+
+// SetSleepTimer arms the sleep timer. With endOfTrack true, playback pauses when
+// the current track finishes (d is ignored); otherwise it fades out over the last
+// few seconds and pauses after d elapses. A non-positive d with endOfTrack false
+// cancels any armed timer.
+func (pl *Player) SetSleepTimer(d time.Duration, endOfTrack bool) { pl.p.SetSleepTimer(d, endOfTrack) }
+
+// CancelSleepTimer disarms the sleep timer and restores full volume.
+func (pl *Player) CancelSleepTimer() { pl.p.CancelSleepTimer() }
+
+// SleepActive reports whether a sleep timer is armed.
+func (pl *Player) SleepActive() bool { return pl.p.SleepActive() }
+
+// SleepEndOfTrack reports whether the armed timer is in end-of-track mode.
+func (pl *Player) SleepEndOfTrack() bool { return pl.p.SleepEndOfTrack() }
+
+// SleepRemainingMS returns the milliseconds until the timer fires (0 if none).
+func (pl *Player) SleepRemainingMS() int64 { return pl.p.SleepRemainingMS() }
 
 // ---- output device selection ----
 

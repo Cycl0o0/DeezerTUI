@@ -46,7 +46,11 @@ Prebuilt binaries for everything are on the [Releases](../../releases) page.
 **Playback**
 - **Quality tiers** — Normal (MP3 128), High (MP3 320), **HiFi (FLAC lossless)**.
 - **Gapless** transitions, **crossfade**, **ReplayGain** loudness normalization.
+- **Sleep timer** — pause after 15/30/45/60 min or at the end of the current
+  track, with a smooth fade-out (on every client + the web remote).
 - **Output-device selection** (powered by the malgo/miniaudio backend).
+- **Perceptual volume** taper + anti-click micro-fades on skip/seek for clean,
+  natural playback.
 - Shuffle, repeat (off/all/one), seek, volume; **resume** the last track on launch.
 - Shows the **actual output format** that's playing (e.g. "FLAC · lossless").
 - **OS media controls + now-playing** — MPRIS on Linux (GNOME/KDE/TUI media keys
@@ -130,7 +134,8 @@ access to your account.
 | l | lyrics (synced) | | d | output device |
 | u | queue view | | c | now-playing + art |
 | s | stop | | t | cycle theme |
-| ? | help | | i | about · q quit |
+| T | sleep timer | | ? | help |
+| i | about | | q | quit |
 
 Home screen entries: Liked Songs · My Playlists · ⚡ Flow · 📈 Charts ·
 🎙 Podcasts · 🔍 Search (and ▶ Resume when a saved position exists).
@@ -378,6 +383,11 @@ playlists.
 Yes. The audio engine (malgo/miniaudio) supports output-device selection,
 gapless transitions, crossfade and ReplayGain — all in settings (or TUI keys
 `d` / `ctrl+g` / `x` / `R`).
+
+**Is there a sleep timer?**
+Yes. Pause after 15/30/45/60 minutes or at the end of the current track, with a
+smooth fade-out. It's in each app's settings, on the phone web remote, and on the
+TUI key `T` (cycles off → 15 → 30 → 45 → 60 min → end of track).
 
 **What's an ARL?**
 Your Deezer session token — the `arl` cookie from a logged-in `deezer.com`

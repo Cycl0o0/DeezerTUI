@@ -126,11 +126,16 @@ func (r *richPresence) connect() error {
 		_ = conn.Close()
 		return err
 	}
-	// Expect a READY dispatch; ignore the contents.
+	// Expect a READY dispatch; ignore the contents. Bound the read: connect() runs
+	// under r.mu (which Close() also needs), so a socket that accepts but never
+	// sends READY (a stale/foreign discord-ipc-N socket) must not block forever and
+	// deadlock shutdown.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, _, err := readFrame(conn); err != nil {
 		_ = conn.Close()
 		return err
 	}
+	_ = conn.SetReadDeadline(time.Time{}) // clear the deadline for the connection's life
 	r.conn = conn
 	r.lastKey = ""
 	r.warnedNoIPC = false

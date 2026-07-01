@@ -103,8 +103,16 @@ func New(arl string) *Client {
 		arl: strings.TrimSpace(arl),
 		http: &http.Client{
 			Timeout: 30 * time.Second,
-			// Don't auto-send cookies; we set the Cookie header ourselves.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return nil },
+			// We don't install a cookie jar (we set the Cookie header ourselves), so
+			// the only reason to override CheckRedirect is to keep a sane hop cap: a
+			// bare `return nil` would disable Go's default 10-redirect limit and let a
+			// misbehaving host loop until the timeout.
+			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return http.ErrUseLastResponse
+				}
+				return nil
+			},
 		},
 	}
 }

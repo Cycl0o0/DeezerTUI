@@ -48,6 +48,11 @@ object Engine {
     // ---- browse (all network; return parsed models) ----
 
     suspend fun favorites(): List<Track> = io { Json.tracks(Odmobile.favorites()) }
+
+    // Client-side favourite check: the engine has no dedicated lookup, so we
+    // reconcile against the loaded favourites list. Best-effort — false on error.
+    suspend fun isFavorite(id: String): Boolean =
+        runCatching { favorites().any { it.id == id } }.getOrDefault(false)
     suspend fun playlists(): List<Playlist> = io { Json.playlists(Odmobile.playlists()) }
     suspend fun playlistTracks(id: String): List<Track> = io { Json.tracks(Odmobile.playlistTracks(id)) }
     suspend fun albumTracks(id: String): List<Track> = io { Json.tracks(Odmobile.albumTracks(id)) }
@@ -93,6 +98,16 @@ object Engine {
     fun gapless(): Boolean = runCatching { Odmobile.gapless() }.getOrDefault(true)
     fun setCrossfadeMs(ms: Int) = runCatching { Odmobile.setCrossfadeMS(ms.toLong()) }.let {}
     fun crossfadeMs(): Int = runCatching { Odmobile.crossfadeMS().toInt() }.getOrDefault(0)
+
+    // ---- sleep timer ----
+    // Pause after [minutes] (auto fade-out), or when the current track ends when
+    // [endOfTrack] is true. minutes <= 0 with endOfTrack == false cancels the timer.
+    fun setSleepTimer(minutes: Int, endOfTrack: Boolean) =
+        runCatching { Odmobile.setSleepTimer(minutes.toLong(), if (endOfTrack) 1L else 0L) }.let {}
+    fun cancelSleepTimer() = runCatching { Odmobile.cancelSleepTimer() }.let {}
+    fun sleepActive(): Boolean = runCatching { Odmobile.sleepActive() != 0L }.getOrDefault(false)
+    fun sleepEndOfTrack(): Boolean = runCatching { Odmobile.sleepEndOfTrack() != 0L }.getOrDefault(false)
+    fun sleepRemainingMs(): Long = runCatching { Odmobile.sleepRemainingMS() }.getOrDefault(0L)
 
     // ---- library writes ----
 

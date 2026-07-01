@@ -817,6 +817,10 @@ public sealed partial class MainWindow : Window
         _nowTitle.Text = "Not playing";
         _nowArtist.Text = "";
         _suppressNav = false;
+        // Force a SelectionChanged even when Home is ALREADY selected (the switch-
+        // account path reverts the nav to _homeItem before login): null it first so
+        // reselecting fires OnNav -> LoadHome and Home shows the new account's data.
+        _nav.SelectedItem = null;
         _nav.SelectedItem = _homeItem; // -> OnNav -> LoadHome
     }
 
@@ -923,24 +927,32 @@ public sealed partial class MainWindow : Window
         _loginDialog.Resources["ContentDialogMaxHeight"] = 740.0;
         _loginWebView = new WebView2 { Width = 560, Height = 640 };
         _loginDialog.Content = _loginWebView;
+        try
+        {
+            // Do NOT await EnsureCoreWebView2Async here: it only completes after the
+            // control loads, which is after ShowAsync -> deadlock. Setting Source kicks
+            // off implicit init; the poll waits for CoreWebView2() to become non-null.
+            _loginWebView.Source = new Uri("https://www.deezer.com/login");
 
-        // Do NOT await EnsureCoreWebView2Async here: it only completes after the
-        // control loads, which is after ShowAsync -> deadlock. Setting Source kicks
-        // off implicit init; the poll waits for CoreWebView2() to become non-null.
-        try { _loginWebView.Source = new Uri("https://www.deezer.com/login"); }
-        catch { _loginWebView = null; _loginDialog = null; return ""; }
+            _arlPollTimer = DispatcherQueue.CreateTimer();
+            _arlPollTimer.Interval = TimeSpan.FromMilliseconds(700);
+            _arlPollTimer.Tick += OnArlPoll;
+            _arlPollTimer.Start();
 
-        _arlPollTimer = DispatcherQueue.CreateTimer();
-        _arlPollTimer.Interval = TimeSpan.FromMilliseconds(700);
-        _arlPollTimer.Tick += OnArlPoll;
-        _arlPollTimer.Start();
-
-        await ShowDialog(_loginDialog); // returns when arl captured (Hide) or Cancel
-
-        if (_arlPollTimer != null) { _arlPollTimer.Stop(); _arlPollTimer = null; }
-        _loginWebView = null;
-        _loginDialog = null;
-        return _capturedArl;
+            await ShowDialog(_loginDialog); // returns when arl captured (Hide) or Cancel
+            return _capturedArl;
+        }
+        catch { return ""; }
+        finally
+        {
+            // Always tear down -- runs on the Source-set exception path too. Detach +
+            // stop the poll timer and Close() the WebView2 so its out-of-process
+            // msedgewebview2.exe host exits now instead of leaking until GC.
+            if (_arlPollTimer != null) { _arlPollTimer.Stop(); _arlPollTimer.Tick -= OnArlPoll; _arlPollTimer = null; }
+            _loginWebView?.Close();
+            _loginWebView = null;
+            _loginDialog = null;
+        }
     }
 
     // Cookie poll (UI thread): once CoreWebView2 is up, read the deezer.com cookie
@@ -2047,12 +2059,13 @@ public sealed partial class MainWindow : Window
     private async void ShowSettings()
     {
         // Output devices + current engine audio state read off the UI thread.
-        var (devJson, curDev, curGapless, curCrossfade, ctrlJson) = await Task.Run(() =>
+        var (devJson, curDev, curGapless, curCrossfade, ctrlJson, slpActive, slpEot, slpRemMs) = await Task.Run(() =>
         {
             string dj = DeezerCore.TakeJson(DeezerCore.DZAudioDevicesJSON());
             string cd = DeezerCore.CurrentAudioDevice();
             string cj = DeezerCore.ControlConfig();
-            return (dj, cd, DeezerCore.DZGapless() != 0, DeezerCore.DZCrossfadeMS(), cj);
+            return (dj, cd, DeezerCore.DZGapless() != 0, DeezerCore.DZCrossfadeMS(), cj,
+                    DeezerCore.DZSleepTimerActive() != 0, DeezerCore.DZSleepTimerEndOfTrack() != 0, DeezerCore.DZSleepTimerRemainingMS());
         });
         var devices = Wire.ParseDevices(devJson);
 
@@ -2131,6 +2144,33 @@ public sealed partial class MainWindow : Window
         var csec = new StackPanel { Spacing = 4 };
         csec.Children.Add(new TextBlock { Text = "Crossfade", FontWeight = FontWeights.SemiBold });
         csec.Children.Add(cfCombo);
+
+        // Sleep timer (engine state; applied on Save via DZSetSleepTimer / DZCancelSleepTimer).
+        // Off / 15 / 30 / 45 / 60 min, or pause when the current track ends.
+        int[] slpMins = { 0, 15, 30, 45, 60 }; // combo index -> minutes; index 5 = End of track
+        var slpCombo = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+        slpCombo.Items.Add("Off");
+        slpCombo.Items.Add("15 minutes");
+        slpCombo.Items.Add("30 minutes");
+        slpCombo.Items.Add("45 minutes");
+        slpCombo.Items.Add("60 minutes");
+        slpCombo.Items.Add("End of track");
+        int slpIdx = 0;
+        if (slpActive)
+        {
+            if (slpEot) slpIdx = 5;
+            else
+            {
+                // Snap the remaining time up to the nearest preset for display.
+                int remMin = (int)((slpRemMs + 59999) / 60000);
+                slpIdx = 4; // default to 60 if it exceeds every preset
+                for (int i = 1; i <= 4; i++) { if (remMin <= slpMins[i]) { slpIdx = i; break; } }
+            }
+        }
+        slpCombo.SelectedIndex = slpIdx;
+        var slsec = new StackPanel { Spacing = 4 };
+        slsec.Children.Add(new TextBlock { Text = "Sleep timer", FontWeight = FontWeights.SemiBold });
+        slsec.Children.Add(slpCombo);
 
         // Volume normalization (ReplayGain) -- bound to engine state.
         var rg = new ToggleSwitch
@@ -2243,6 +2283,7 @@ public sealed partial class MainWindow : Window
         sp.Children.Add(asec);
         sp.Children.Add(gsec);
         sp.Children.Add(csec);
+        sp.Children.Add(slsec);
         sp.Children.Add(rsec);
         sp.Children.Add(tsec);
         sp.Children.Add(rcsec);
@@ -2286,6 +2327,17 @@ public sealed partial class MainWindow : Window
             int ci = cfCombo.SelectedIndex; if (ci < 0 || ci > 3) ci = 0;
             _settings.CrossfadeMs = cfVals[ci];
             DeezerCore.DZSetCrossfadeMS(_settings.CrossfadeMs);
+
+            // Sleep timer: only touch the engine when the user changed the selection,
+            // so re-saving other settings never resets a running timer. Transient
+            // engine state -- not persisted to _settings.
+            int si = slpCombo.SelectedIndex;
+            if (si != slpIdx)
+            {
+                if (si <= 0) DeezerCore.DZCancelSleepTimer();
+                else if (si == 5) DeezerCore.DZSetSleepTimer(0, 1);   // End of track
+                else DeezerCore.DZSetSleepTimer(slpMins[si], 0);       // minutes
+            }
 
             Config.SaveSettings(_settings);
         }
@@ -2420,7 +2472,7 @@ public sealed partial class MainWindow : Window
     private async void ShowAbout()
     {
         var sp = new StackPanel { Spacing = 8 };
-        sp.Children.Add(new TextBlock { Text = "OpenDeezer 1.5.2", FontSize = 22, FontWeight = FontWeights.SemiBold, Foreground = _accent });
+        sp.Children.Add(new TextBlock { Text = "OpenDeezer 1.6.0", FontSize = 22, FontWeight = FontWeights.SemiBold, Foreground = _accent });
         sp.Children.Add(new TextBlock { Text = "An open source reimplementation of Deezer.", TextWrapping = TextWrapping.Wrap });
         sp.Children.Add(new TextBlock
         {

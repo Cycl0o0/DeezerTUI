@@ -62,6 +62,20 @@ fun TvSettingsScreen(account: Account?, onLogout: () -> Unit) {
     var quality by remember { mutableStateOf(Engine.quality()) }
     var replayGain by remember { mutableStateOf(Engine.replayGain()) }
     var gapless by remember { mutableStateOf(Engine.gapless()) }
+    var sleepSel by remember {
+        mutableStateOf(
+            when {
+                Engine.sleepEndOfTrack() -> 5
+                Engine.sleepActive() -> when ((Engine.sleepRemainingMs() / 60_000L).toInt()) {
+                    in 0 until 15 -> 1
+                    in 15 until 30 -> 2
+                    in 30 until 45 -> 3
+                    else -> 4
+                }
+                else -> 0
+            },
+        )
+    }
     var connectHost by remember { mutableStateOf(Engine.connectHostInfo()?.enabled ?: false) }
     var connectAddr by remember { mutableStateOf(Engine.connectHostInfo()?.addr.orEmpty()) }
     var phoneRemote by remember { mutableStateOf(Engine.webRemoteInfo()?.enabled ?: false) }
@@ -141,6 +155,33 @@ fun TvSettingsScreen(account: Account?, onLogout: () -> Unit) {
         item {
             TvToggleRow("Gapless playback", "No silence between tracks", gapless) {
                 gapless = it; Engine.setGapless(it); prefs.gapless = if (it) 1 else 0
+            }
+        }
+        item {
+            val labels = listOf("Off", "15", "30", "45", "60", "End")
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Sleep timer", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    labels.forEachIndexed { i, label ->
+                        TvChoicePill(label, selected = sleepSel == i, enabled = true) {
+                            sleepSel = i
+                            when (i) {
+                                0 -> Engine.cancelSleepTimer()
+                                labels.lastIndex -> Engine.setSleepTimer(0, endOfTrack = true)
+                                else -> Engine.setSleepTimer(label.toInt(), endOfTrack = false)
+                            }
+                        }
+                    }
+                }
+                Text(
+                    when (sleepSel) {
+                        0 -> "Playback won't pause automatically"
+                        labels.lastIndex -> "Pauses when the current track ends"
+                        else -> "Pauses in ${labels[sleepSel]} minutes"
+                    },
+                    color = TvPalette.TextDim,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
 

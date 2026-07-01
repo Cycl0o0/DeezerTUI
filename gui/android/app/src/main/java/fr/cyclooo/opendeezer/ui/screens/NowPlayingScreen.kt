@@ -37,6 +37,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +72,13 @@ fun NowPlayingScreen(
     var liked by remember(track?.id) { mutableStateOf(false) }
     var scrubbing by remember { mutableStateOf(false) }
     var scrubValue by remember { mutableFloatStateOf(0f) }
+
+    // Reconcile the heart with the engine's real favourite state so an
+    // already-liked track shows filled and the first tap removes it.
+    LaunchedEffect(track?.id) {
+        val t = track
+        liked = t != null && !t.isEpisode && Engine.isFavorite(t.id)
+    }
 
     val duration = state.durationMs.coerceAtLeast(1L)
     val livePosFraction = (state.positionMs.toFloat() / duration.toFloat()).coerceIn(0f, 1f)

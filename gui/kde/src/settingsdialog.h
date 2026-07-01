@@ -62,6 +62,7 @@ signals:
 private:
     void save();
     void applyControlConfig(); // pushes enable/LAN/token to the engine live
+    void applySleepTimer();    // pushes the chosen sleep-timer preset to the engine live
     void checkForUpdates();    // on-demand DZCheckUpdateJSON; shows the result inline
 
     QString    m_iniPath;
@@ -72,6 +73,7 @@ private:
     QComboBox *m_device      = nullptr;
     QCheckBox *m_gapless     = nullptr;
     QComboBox *m_crossfade   = nullptr;
+    QComboBox *m_sleepTimer  = nullptr;    // Off / 15 / 30 / 45 / 60 min / End of track
 
     // ---- About / manual update check (v1.5.1) ----
     QPushButton *m_checkUpdatesBtn   = nullptr;

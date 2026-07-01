@@ -18,7 +18,7 @@ import (
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
-var version = "1.5.2"
+var version = "1.6.0"
 
 func main() {
 	saveARL := flag.String("save-arl", "", "save this ARL to ~/.config/opendeezer/arl.txt and exit")

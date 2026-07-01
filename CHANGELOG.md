@@ -4,6 +4,75 @@ All notable changes to OpenDeezer are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0]
+
+### Added
+- **Sleep timer** (all clients): a core-owned countdown that pauses playback
+  after a chosen interval — Off / 15 / 30 / 45 / 60 minutes, or **at the end of
+  the current track**. It fades the audio out smoothly over the last few seconds
+  before pausing. Because the timer runs on the audio engine's own clock in the
+  shared Go core, every client shows the same behaviour: the TUI (`T` to cycle),
+  the phone web remote (a Sleep button), and native controls in the macOS, iOS,
+  Android (phone + TV), Windows, GNOME and KDE apps. Also reachable over the
+  control API (`POST /sleep`) and the SDK.
+- **Perceptual volume taper**: the volume control now follows a cubic (perceptual)
+  curve instead of a linear one, so the slider feels natural across its whole
+  range instead of jumping to near-full loudness in the bottom third. The public
+  0–1 volume API is unchanged, so every client inherits the fix with no UI work.
+- **Anti-click micro-fades**: a ~12 ms ramp is applied after a playback
+  discontinuity (track start, resume, seek/scrub) to eliminate the click/pop that
+  cutting into a fresh waveform used to produce. Pure core polish; all clients.
+
+### Fixed
+- **ReplayGain with gapless**: after a gapless track change the engine kept
+  applying the *previous* track's ReplayGain, so every gaplessly-advanced track
+  played at the wrong loudness. The per-track gain is now recomputed on the swap.
+- **ReplayGain toggled mid-track**: enabling ReplayGain during playback now takes
+  effect immediately instead of only on the next track.
+- **Shuffle/repeat vs. gapless preload (TUI)**: toggling shuffle or repeat after
+  the next track had already been preloaded could desync the queue pointer from
+  the audio (footer/now-playing/lyrics/MPRIS showed a different track than was
+  playing). The finish handler now advances deterministically to the preloaded
+  track, and toggling shuffle/repeat invalidates and re-issues the preload.
+- **Connect remote auto-advance (mobile)**: when playback was routed to another
+  device, a track ending was only observed by the status poller, which never
+  fired the auto-advance — so remote playback halted after each track. The poller
+  now detects the track-end transition and advances, matching the desktop engine.
+- **Crash/data race in device discovery (macOS/GNOME/KDE/Windows)**: the shared
+  control-server pointer was read without its lock while the settings toggles
+  could null it, a data race that could nil-dereference and crash the GUI across
+  the cgo boundary. The read is now taken under the lock. Same unlocked read fixed
+  in the mobile discovery path.
+- **Empty device picker on discovery error**: a transient/partial LAN discovery
+  error discarded the manually-configured (VPN/Tailscale) peers too, leaving the
+  picker empty. Configured peers are now always returned.
+- **Redirect cap**: the Deezer HTTP client had its 10-redirect safety limit
+  disabled by a custom redirect policy; the cap is restored so a misbehaving host
+  can't loop until the timeout.
+- **Discord RP hang**: the IPC handshake read had no deadline while holding the
+  presence lock, so a stale/foreign `discord-ipc` socket could block shutdown. A
+  read deadline is now set on the handshake.
+- **Pairing code no longer accepted via query string** (control API): the 6-digit
+  pairing credential is read from the request body only (matching the module's
+  header/body-only policy), so it can't leak into proxy logs, history or Referer.
+- **Crossfade allocation**: the crossfade path allocated a buffer on every
+  realtime audio callback; it now reuses a scratch buffer to avoid RT-thread
+  churn.
+- **macOS**: switching accounts no longer stacks duplicate 0.4s polling timers or
+  duplicate media-key handlers (Next/Prev used to jump two tracks after a switch).
+- **iOS**: the app version was stuck at 1.5.1 in the committed Xcode project; it
+  now tracks the release.
+- **Android**: the Now-Playing heart now reflects the track's real favourite
+  state on entry (instead of always empty), and the login WebView (phone + TV) is
+  destroyed when its screen leaves composition to stop leaking the renderer.
+- **Windows**: switching accounts while on Home now refreshes Home for the new
+  account, and the login WebView2 is closed so it doesn't leak browser processes.
+- **GNOME**: shuffle and repeat-all now actually work for local playback (they
+  used to only light up the buttons); the Settings/device combo models no longer
+  leak; the About/meson version is corrected.
+- **KDE**: fixed two use-after-free crashes where the Settings update-check and
+  the login ARL-verify could touch a dialog that had already been dismissed.
+
 ## [1.5.2]
 
 ### Added

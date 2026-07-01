@@ -33,7 +33,7 @@ import (
 )
 
 // Version is the engine/app version.
-const Version = "1.5.2"
+const Version = "1.6.0"
 
 var (
 	mu       sync.Mutex
@@ -225,6 +225,47 @@ func SetCrossfadeMS(ms int) {
 		p.SetCrossfadeMS(ms)
 	}
 }
+
+// SetSleepTimer arms the sleep timer: pause after `minutes` (with a fade-out), or
+// when the current track ends if endOfTrack != 0 (minutes ignored). minutes <= 0
+// with endOfTrack == 0 cancels it.
+func SetSleepTimer(minutes int, endOfTrack int) {
+	if p := curPlayer(); p != nil {
+		p.SetSleepTimer(time.Duration(minutes)*time.Minute, endOfTrack != 0)
+	}
+}
+
+// CancelSleepTimer disarms the sleep timer.
+func CancelSleepTimer() {
+	if p := curPlayer(); p != nil {
+		p.CancelSleepTimer()
+	}
+}
+
+// SleepActive reports whether a sleep timer is armed (1) or not (0).
+func SleepActive() int {
+	if p := curPlayer(); p != nil && p.SleepActive() {
+		return 1
+	}
+	return 0
+}
+
+// SleepEndOfTrack reports whether the armed timer is end-of-track mode (1/0).
+func SleepEndOfTrack() int {
+	if p := curPlayer(); p != nil && p.SleepEndOfTrack() {
+		return 1
+	}
+	return 0
+}
+
+// SleepRemainingMS returns milliseconds until the timer fires (0 if none).
+func SleepRemainingMS() int64 {
+	if p := curPlayer(); p != nil {
+		return p.SleepRemainingMS()
+	}
+	return 0
+}
+
 func CrossfadeMS() int {
 	if p := curPlayer(); p != nil {
 		return p.CrossfadeMS()
@@ -684,6 +725,8 @@ func engineState() control.State {
 	st := control.State{
 		PositionMS: p.PositionMS(), DurationMS: p.DurationMS(),
 		Volume: p.Volume(), Repeat: "off", Format: p.Format(),
+		SleepActive: p.SleepActive(), SleepEndOfTrack: p.SleepEndOfTrack(),
+		SleepRemainingMS: p.SleepRemainingMS(),
 	}
 	switch p.State() {
 	case audio.Playing:
@@ -737,6 +780,16 @@ func engineCommands() control.Commands {
 		},
 		PlayTrack:    func(id string) { Play(id, 0) },
 		PlayPlaylist: func(id string) {},
+		SetSleepTimer: func(minutes int, eot bool) {
+			if p := curPlayer(); p != nil {
+				p.SetSleepTimer(time.Duration(minutes)*time.Minute, eot)
+			}
+		},
+		CancelSleepTimer: func() {
+			if p := curPlayer(); p != nil {
+				p.CancelSleepTimer()
+			}
+		},
 	}
 }
 
@@ -797,9 +850,14 @@ func DiscoverDevices(timeoutMS int) string {
 	if timeoutMS <= 0 {
 		timeoutMS = 700
 	}
+	// Read the shared control server under mu (all other accessors do); an unlocked
+	// read races the web-remote/Connect-host toggles that (re)create it.
+	mu.Lock()
+	srv := ctrlSrv
+	mu.Unlock()
 	self := 0
-	if ctrlSrv != nil {
-		if _, port, err := net.SplitHostPort(ctrlSrv.Addr()); err == nil {
+	if srv != nil {
+		if _, port, err := net.SplitHostPort(srv.Addr()); err == nil {
 			self, _ = strconv.Atoi(port)
 		}
 	}
@@ -951,6 +1009,16 @@ func remotePoller(rc *control.Client, stop chan struct{}) {
 			mu.Lock()
 			active := remoteCli == rc
 			if active {
+				// A remote track ending shows up only in this passive poll (no
+				// command is issued during normal playback), so detect the
+				// playing -> stopped transition near the end here and bump finished
+				// to fire the app's auto-advance — mirroring setRemoteState, which
+				// only the command path reaches. Without this, remote playback halts
+				// after each track. The position guard ignores user-initiated stops.
+				if remoteSt.State == "playing" && st.State == "stopped" &&
+					remoteSt.DurationMS > 0 && remoteSt.PositionMS >= remoteSt.DurationMS-2000 {
+					finished++
+				}
 				remoteSt = st
 			}
 			mu.Unlock()

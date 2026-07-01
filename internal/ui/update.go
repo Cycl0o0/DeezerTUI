@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/Cycl0o0/OpenDeezer/internal/audio"
 	"github.com/Cycl0o0/OpenDeezer/internal/deezer"
@@ -230,7 +231,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// next track — sync the queue pointer (only preloaded for the linear next)
 		// and refresh the UI without re-Play()ing. Otherwise advance + play.
 		if m.player.State() == audio.Playing {
-			m.q.Next()
+			// The player swapped in the preloaded next, which is always the
+			// deterministic linear next (PeekNext). Advance the cursor to that same
+			// track — NOT via Next(), which would re-evaluate shuffle/repeat at
+			// finish time and could jump to a different track than the audio.
+			m.q.AdvanceLinear()
 			m.playing = true
 			if t, ok := m.q.Current(); ok {
 				return m, tea.Batch(m.onTrackChanged(t), m.preloadNextCmd(), m.waitFinish())
@@ -387,6 +392,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, remoteCmd(m.remote.CycleRepeat)
 			}
 			m.q.CycleRepeat()
+			m.player.ClearPreload() // upcoming track may differ under the new mode
+			cmd = m.preloadNextCmd()
 		case "shuffle":
 			if m.remote != nil {
 				m.publishMedia()
@@ -394,6 +401,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, remoteCmd(m.remote.ToggleShuffle)
 			}
 			m.q.ToggleShuffle()
+			m.player.ClearPreload()
+			cmd = m.preloadNextCmd()
 		case "seek":
 			m.player.SeekMS(msg.ms)
 		case "volume":
@@ -402,6 +411,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd = m.playTrackByIDCmd(msg.id)
 		case "playplaylist":
 			cmd = m.playPlaylistByIDCmd(msg.id)
+		case "sleep":
+			m.player.SetSleepTimer(time.Duration(msg.ms)*time.Minute, msg.eot)
+			m.status = sleepStatus(m.player)
+		case "sleepcancel":
+			m.player.CancelSleepTimer()
+			m.status = "Sleep timer off"
 		}
 		m.publishMedia()
 		m.publishControl()
@@ -567,7 +582,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.remote != nil {
 			return m, remoteCmd(m.remote.CycleRepeat)
 		}
-		return m, nil
+		// The upcoming track may have changed; drop the stale linear preload and
+		// re-preload for the new mode (no-op preload when now non-deterministic).
+		m.player.ClearPreload()
+		return m, m.preloadNextCmd()
 	case "z":
 		if m.q.ToggleShuffle() {
 			m.status = "Shuffle on"
@@ -578,7 +596,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.remote != nil {
 			return m, remoteCmd(m.remote.ToggleShuffle)
 		}
-		return m, nil
+		m.player.ClearPreload()
+		return m, m.preloadNextCmd()
 	case "g":
 		m.list.Select(0)
 		return m, nil
@@ -602,6 +621,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "t":
 		m.status = "Theme: " + m.cycleTheme()
+		return m, nil
+	case "T":
+		// Cycle the sleep timer: off → 15 → 30 → 45 → 60 min → end-of-track → off.
+		m.cycleSleepTimer()
+		m.status = sleepStatus(m.player)
 		return m, nil
 	case "R":
 		on := !m.player.ReplayGain()

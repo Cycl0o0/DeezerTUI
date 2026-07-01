@@ -160,6 +160,8 @@ func engineState() control.State {
 	st := control.State{
 		PositionMS: p.PositionMS(), DurationMS: p.DurationMS(),
 		Volume: p.Volume(), Repeat: "off", Format: p.Format(),
+		SleepActive: p.SleepActive(), SleepEndOfTrack: p.SleepEndOfTrack(),
+		SleepRemainingMS: p.SleepRemainingMS(),
 	}
 	switch p.State() {
 	case audio.Playing:
@@ -256,6 +258,12 @@ func engineCommands() control.Commands {
 				}
 			}
 		},
+		SetSleepTimer: func(minutes int, eot bool) {
+			withPlayer(func(p *audio.Player) {
+				p.SetSleepTimer(time.Duration(minutes)*time.Minute, eot)
+			})
+		},
+		CancelSleepTimer: func() { withPlayer(func(p *audio.Player) { p.CancelSleepTimer() }) },
 	}
 }
 

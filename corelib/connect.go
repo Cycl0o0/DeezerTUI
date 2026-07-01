@@ -27,10 +27,16 @@ import (
 // selfControlPort is this instance's control API port (0 if disabled), used to
 // filter our own responder out of discovery results.
 func selfControlPort() int {
-	if ctrlSrv == nil {
+	// Capture the shared server pointer under mu (every other reader/writer of
+	// ctrlSrv does): reading it unlocked races the settings-toggle writers and a
+	// nil store between the check and Addr() would panic across the cgo boundary.
+	mu.Lock()
+	srv := ctrlSrv
+	mu.Unlock()
+	if srv == nil {
 		return 0
 	}
-	_, port, err := net.SplitHostPort(ctrlSrv.Addr())
+	_, port, err := net.SplitHostPort(srv.Addr())
 	if err != nil {
 		return 0
 	}
@@ -107,11 +113,17 @@ func DZDiscoverDevices(timeoutMS C.int) *C.char {
 		ms = 600
 	}
 	devs, err := discovery.Discover(time.Duration(ms)*time.Millisecond, selfControlPort())
+	if err != nil {
+		// A discovery error is expected/partial (e.g. no multicast on a VPN); don't
+		// discard the configured unicast peers merged in below by returning an error
+		// object — that would leave the picker empty despite reachable devices.
+		odlog.Debug("discover: %v", err)
+	}
 	if devs == nil {
 		devs = []discovery.Device{}
 	}
 	devs = mergeConfiguredPeers(devs)
-	return jsonStr(devs, err)
+	return jsonStr(devs, nil)
 }
 
 // mergeConfiguredPeers adds manually-listed peers (config) not already found by

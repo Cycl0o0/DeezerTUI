@@ -110,6 +110,15 @@ internal static class DeezerCore
     // ---- update check (GitHub releases; never downloads/installs anything) ---
     [DllImport(Dll, CallingConvention = Cdecl)] internal static extern IntPtr DZCheckUpdateJSON();
 
+    // ---- v1.6 additions (sleep timer) ----------------------------------------
+    // Pause after `minutes` (with an auto fade-out) or when the current track ends
+    // if endOfTrack != 0. minutes<=0 && endOfTrack==0 cancels.
+    [DllImport(Dll, CallingConvention = Cdecl)] internal static extern void DZSetSleepTimer(int minutes, int endOfTrack);
+    [DllImport(Dll, CallingConvention = Cdecl)] internal static extern void DZCancelSleepTimer();
+    [DllImport(Dll, CallingConvention = Cdecl)] internal static extern int DZSleepTimerActive();      // 1/0
+    [DllImport(Dll, CallingConvention = Cdecl)] internal static extern int DZSleepTimerEndOfTrack();   // 1/0
+    [DllImport(Dll, CallingConvention = Cdecl)] internal static extern long DZSleepTimerRemainingMS();
+
     // ---- helpers -------------------------------------------------------------
     // Own a DZ*JSON / char* result, copy it (UTF-8) and release it with DZFree.
     // Mirrors the C++ TakeJson(char*).

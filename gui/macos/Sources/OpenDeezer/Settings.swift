@@ -69,6 +69,12 @@ struct SettingsView: View {
     @State private var controlLAN = false
     @State private var controlToken = ""
 
+    // Sleep timer remaining, refreshed once a second while the sheet is open.
+    // The armed mode itself lives in AppState (app.sleepMode); the engine owns
+    // the countdown, so we only mirror the "12:34" display here.
+    @State private var sleepRemaining = ""
+    private let sleepTick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
@@ -159,6 +165,28 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     Text("Fades the end of one track into the start of the next.")
+                        .font(.caption).foregroundStyle(DZ.textSec)
+                }
+            }
+
+            // Sleep timer
+            settingsCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Sleep timer", systemImage: "moon.zzz.fill")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(DZ.textPri)
+                    Picker("", selection: Binding(
+                        get: { app.sleepMode },
+                        set: { app.setSleepMode($0); updateSleepRemaining() })) {
+                        Text("Off").tag(0)
+                        Text("15 min").tag(15)
+                        Text("30 min").tag(30)
+                        Text("45 min").tag(45)
+                        Text("60 min").tag(60)
+                        Text("End of track").tag(-1)
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    Text(sleepTimerNote)
                         .font(.caption).foregroundStyle(DZ.textSec)
                 }
             }
@@ -305,7 +333,31 @@ struct SettingsView: View {
             app.loadAudioDevices()
             loadWebRemoteInfo()
             loadControlConfig()
+            updateSleepRemaining()
         }
+        .onReceive(sleepTick) { _ in updateSleepRemaining() }
+    }
+
+    // Caption under the sleep-timer picker: shows the live countdown while a
+    // minutes-based timer runs, otherwise a short description of the choice.
+    private var sleepTimerNote: String {
+        if app.sleepMode == -1 {
+            return "Playback pauses when the current track ends."
+        } else if app.sleepMode > 0 {
+            return sleepRemaining.isEmpty
+                ? "Fades out and pauses after \(app.sleepMode) minutes."
+                : "Fades out and pauses in \(sleepRemaining)."
+        }
+        return "Automatically pause playback after a set time."
+    }
+
+    // Refresh the "12:34" remaining string from the engine (minutes mode only).
+    private func updateSleepRemaining() {
+        guard app.sleepMode > 0, Core.sleepActive() else { sleepRemaining = ""; return }
+        let ms = Core.sleepRemainingMS()
+        guard ms > 0 else { sleepRemaining = ""; return }
+        let secs = Int(ms / 1000)
+        sleepRemaining = String(format: "%d:%02d", secs / 60, secs % 60)
     }
 
     private func loadWebRemoteInfo() {

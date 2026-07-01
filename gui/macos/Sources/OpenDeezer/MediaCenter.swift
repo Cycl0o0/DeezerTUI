@@ -23,6 +23,16 @@ final class NowPlayingController {
         self.app = app
         let cc = MPRemoteCommandCenter.shared()
 
+        // Idempotent: MPRemoteCommandCenter.shared() is a process-wide singleton,
+        // so drop any handlers left by a previous login before re-adding. Without
+        // this, a "Switch account" re-login stacks a second target on each command
+        // and every media-key press fires twice (Next skips two tracks, etc.).
+        for cmd in [cc.playCommand, cc.pauseCommand, cc.togglePlayPauseCommand,
+                    cc.nextTrackCommand, cc.previousTrackCommand,
+                    cc.changePlaybackPositionCommand] {
+            cmd.removeTarget(nil)
+        }
+
         cc.playCommand.isEnabled = true
         cc.playCommand.addTarget { [weak app] _ in
             guard let app else { return .commandFailed }

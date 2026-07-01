@@ -130,6 +130,21 @@ func (c *Client) PlayPlaylist(id string) (State, error) {
 	return c.state(http.MethodPost, "/play/playlist?id="+url.QueryEscape(id))
 }
 
+// SetSleepTimer arms the peer's sleep timer: pause after `minutes` (with a
+// fade-out), or when the current track ends if endOfTrack is true.
+func (c *Client) SetSleepTimer(minutes int, endOfTrack bool) (State, error) {
+	q := "/sleep?minutes=" + strconv.Itoa(minutes)
+	if endOfTrack {
+		q += "&eot=1"
+	}
+	return c.state(http.MethodPost, q)
+}
+
+// CancelSleepTimer disarms the peer's sleep timer.
+func (c *Client) CancelSleepTimer() (State, error) {
+	return c.state(http.MethodPost, "/sleep?cancel=1")
+}
+
 // Search returns the raw search-results JSON from the server.
 func (c *Client) Search(q string) (json.RawMessage, error) {
 	return c.raw(http.MethodGet, "/search?q="+url.QueryEscape(q))

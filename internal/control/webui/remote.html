@@ -330,6 +330,7 @@ body {
   <div class="extra-controls">
     <button id="repeat-btn" class="ctrl-btn" title="Repeat">&#8635; Repeat: off</button>
     <button id="shuffle-btn" class="ctrl-btn" title="Shuffle">&#8652; Shuffle</button>
+    <button id="sleep-btn" class="ctrl-btn" title="Sleep timer">&#9790; Sleep</button>
   </div>
 
   <div id="state-badge"></div>
@@ -367,6 +368,7 @@ var nextBtn     = document.getElementById('next-btn');
 var volSlider   = document.getElementById('volume-slider');
 var repeatBtn   = document.getElementById('repeat-btn');
 var shuffleBtn  = document.getElementById('shuffle-btn');
+var sleepBtn    = document.getElementById('sleep-btn');
 var stateBadge  = document.getElementById('state-badge');
 
 // ---- View switching ----
@@ -536,6 +538,17 @@ function applyState(st) {
   // Shuffle button
   shuffleBtn.className = 'ctrl-btn' + (st.shuffle ? ' active' : '');
   shuffleBtn.innerHTML = '&#8652; Shuffle' + (st.shuffle ? ': on' : '');
+
+  // Sleep-timer button
+  sleepBtn.className = 'ctrl-btn' + (st.sleepActive ? ' active' : '');
+  if (st.sleepActive && st.sleepEndOfTrack) {
+    sleepBtn.innerHTML = '&#9790; Sleep: end of track';
+  } else if (st.sleepActive) {
+    var mins = Math.max(1, Math.round((st.sleepRemainingMs || 0) / 60000));
+    sleepBtn.innerHTML = '&#9790; Sleep: ' + mins + ' min';
+  } else {
+    sleepBtn.innerHTML = '&#9790; Sleep';
+  }
 }
 
 // ---- Transport controls ----
@@ -585,6 +598,27 @@ repeatBtn.addEventListener('click', function() {
 shuffleBtn.addEventListener('click', function() {
   var on = currentState.shuffle ? 'false' : 'true';
   api('POST', '/shuffle?on=' + on).then(applyState).catch(function() {});
+});
+
+// ---- Sleep timer (cycle: off → 15 → 30 → 45 → 60 min → end-of-track → off) ----
+var sleepCycle = [0, 15, 30, 45, 60, -1]; // -1 = end of track
+function currentSleepStep() {
+  if (!currentState.sleepActive) return 0;
+  if (currentState.sleepEndOfTrack) return 5;
+  var mins = Math.round((currentState.sleepRemainingMs || 0) / 60000);
+  var closest = 1, best = 1e9;
+  for (var i = 1; i <= 4; i++) {
+    var d = Math.abs(sleepCycle[i] - mins);
+    if (d < best) { best = d; closest = i; }
+  }
+  return closest;
+}
+sleepBtn.addEventListener('click', function() {
+  var next = (currentSleepStep() + 1) % sleepCycle.length;
+  var v = sleepCycle[next];
+  var path = (v === 0) ? '/sleep?cancel=1'
+    : (v < 0 ? '/sleep?eot=1' : '/sleep?minutes=' + v);
+  api('POST', path).then(applyState).catch(function() {});
 });
 
 // ---- Init ----

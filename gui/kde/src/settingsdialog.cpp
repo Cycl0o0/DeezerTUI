@@ -2,6 +2,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -11,6 +12,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QSettings>
 #include <QUrl>
@@ -35,6 +37,16 @@ extern "C" char *DZWebRemoteInfoJSON(void);       // {"enabled":bool,...}
 // v1.5.1 addition. Checks GitHub for a newer release; never downloads or
 // installs anything. Result is a malloc'd JSON string — free with DZFree.
 extern "C" char *DZCheckUpdateJSON(void); // {"current","latest","hasUpdate","url","notes"}
+
+// Sleep timer. Pause after `minutes` (auto fade-out), or when the current track
+// ends if endOfTrack != 0; minutes<=0 & endOfTrack==0 cancels. Applied live on
+// change (like the remote-control group) — it's a transient engine action, not
+// a persisted playback setting.
+extern "C" void      DZSetSleepTimer(int minutes, int endOfTrack);
+extern "C" void      DZCancelSleepTimer(void);
+extern "C" int       DZSleepTimerActive(void);        // 1/0
+extern "C" int       DZSleepTimerEndOfTrack(void);    // 1/0
+extern "C" long long DZSleepTimerRemainingMS(void);
 
 namespace {
 const char *kKeyQuality    = "audio/qualityLevel"; // int: 0=128, 1=320, 2=FLAC
@@ -150,6 +162,34 @@ SettingsDialog::SettingsDialog(const QString &iniPath,
         m_crossfade->setCurrentIndex(sel < 0 ? 0 : sel);
     }
     audioForm->addRow(QStringLiteral("Crossfade"), m_crossfade);
+
+    // Sleep timer — pause after N minutes (auto fade-out) or at the end of the
+    // current track. Not persisted: it's a live, transient engine action, so it
+    // applies immediately on change rather than waiting for OK.
+    m_sleepTimer = new QComboBox;
+    m_sleepTimer->addItem(QStringLiteral("Off"), 0);
+    m_sleepTimer->addItem(QStringLiteral("15 minutes"), 15);
+    m_sleepTimer->addItem(QStringLiteral("30 minutes"), 30);
+    m_sleepTimer->addItem(QStringLiteral("45 minutes"), 45);
+    m_sleepTimer->addItem(QStringLiteral("60 minutes"), 60);
+    m_sleepTimer->addItem(QStringLiteral("End of track"), -1);
+    // Reflect the engine's current sleep-timer state; a running countdown is
+    // snapped up to the nearest preset for display.
+    if (DZSleepTimerActive()) {
+        if (DZSleepTimerEndOfTrack()) {
+            m_sleepTimer->setCurrentIndex(m_sleepTimer->findData(-1));
+        } else {
+            const long long remMin = (DZSleepTimerRemainingMS() + 59999) / 60000;
+            int sel = -1;
+            for (int m : {15, 30, 45, 60})
+                if (remMin <= m) { sel = m_sleepTimer->findData(m); break; }
+            m_sleepTimer->setCurrentIndex(sel < 0 ? m_sleepTimer->findData(60) : sel);
+        }
+    }
+    // Connect after seeding the index so the initial state doesn't re-apply.
+    connect(m_sleepTimer, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int) { applySleepTimer(); });
+    audioForm->addRow(QStringLiteral("Sleep timer"), m_sleepTimer);
     root->addWidget(audioBox);
 
     // ---- Behaviour ----
@@ -301,6 +341,18 @@ void SettingsDialog::applyControlConfig() {
                         const_cast<char *>(token.constData()));
 }
 
+// Push the chosen sleep-timer preset to the engine live: >0 minutes counts
+// down (auto fade-out), <0 pauses at the end of the current track, 0 cancels.
+void SettingsDialog::applySleepTimer() {
+    const int v = m_sleepTimer->currentData().toInt();
+    if (v > 0)
+        DZSetSleepTimer(v, 0);
+    else if (v < 0)
+        DZSetSleepTimer(0, 1);
+    else
+        DZCancelSleepTimer();
+}
+
 // On-demand release check: runs DZCheckUpdateJSON off the GUI thread (it hits
 // the network) and shows the result inline. Never downloads or installs
 // anything — Download just opens the release page in the browser.
@@ -310,9 +362,17 @@ void SettingsDialog::checkForUpdates() {
     m_updateResult->setText(QStringLiteral("Checking…"));
     m_updateResult->setToolTip(QString());
 
-    QtConcurrent::run([this] {
+    // The dialog is a stack local in MainWindow and may be dismissed (OK /
+    // Cancel / Escape) — and thus destroyed — before this blocking network
+    // check returns. Guard the GUI-thread callback with a QPointer and post it
+    // through qApp (which always outlives the dialog) so nothing dereferences a
+    // freed dialog: not the queued lambda, and not invokeMethod's receiver.
+    QPointer<SettingsDialog> self(this);
+    QtConcurrent::run([this, self] {
         const QByteArray j = takeJson(DZCheckUpdateJSON());
-        QMetaObject::invokeMethod(this, [this, j] {
+        QMetaObject::invokeMethod(qApp, [this, self, j] {
+            if (!self)
+                return;
             m_checkUpdatesBtn->setEnabled(true);
             const QJsonObject o = QJsonDocument::fromJson(j).object();
             const QString latest = o.value("latest").toString();

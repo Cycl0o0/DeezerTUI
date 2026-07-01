@@ -153,6 +153,19 @@ enum Engine {
     static func setCrossfadeMS(_ ms: Int) { OdmobileSetCrossfadeMS(ms) }
     static func crossfadeMS() -> Int { OdmobileCrossfadeMS() }
 
+    // MARK: - Sleep timer
+
+    /// Pause after `minutes` (with fade-out), or when the current track ends if
+    /// `endOfTrack` is true. Passing `minutes <= 0` with `endOfTrack == false`
+    /// cancels any pending timer.
+    static func setSleepTimer(minutes: Int, endOfTrack: Bool) {
+        OdmobileSetSleepTimer(minutes, endOfTrack ? 1 : 0)
+    }
+    static func cancelSleepTimer() { OdmobileCancelSleepTimer() }
+    static func sleepActive() -> Bool { OdmobileSleepActive() != 0 }
+    static func sleepEndOfTrack() -> Bool { OdmobileSleepEndOfTrack() != 0 }
+    static func sleepRemainingMS() -> Int64 { OdmobileSleepRemainingMS() }
+
     // MARK: - Connect
 
     static func discoverDevices(timeoutMs: Int) async -> [Device] {

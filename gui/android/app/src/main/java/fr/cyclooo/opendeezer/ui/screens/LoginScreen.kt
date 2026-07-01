@@ -134,6 +134,13 @@ fun LoginScreen(
                         loadUrl(LOGIN_URL)
                     }
                 },
+                onRelease = {
+                    it.stopLoading()
+                    it.loadUrl("about:blank")
+                    (it.parent as? android.view.ViewGroup)?.removeView(it)
+                    it.removeAllViews()
+                    it.destroy()
+                },
             )
             OutlinedButton(
                 onClick = { manual = true },

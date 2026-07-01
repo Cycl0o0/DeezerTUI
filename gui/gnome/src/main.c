@@ -62,6 +62,21 @@ extern void  DZSetControlConfig(int enabled, char *addr, char *token);
  * (see check_update_async), plus on demand from Settings > Updates. */
 extern char *DZCheckUpdateJSON(void);
 
+/* Sleep timer — pause playback after a delay (auto fade-out) or at the end of
+ * the current track. Declared explicitly (see DZSetRepeat above) so this file
+ * compiles against an older libdeezercore.h.
+ *   DZSetSleepTimer(minutes, endOfTrack): pause after `minutes` (fade-out), or
+ *     when the current track ends if endOfTrack != 0; minutes<=0 & endOfTrack==0
+ *     cancels.
+ *   DZCancelSleepTimer(): cancel any pending timer.
+ *   DZSleepTimerActive(): 1 if a timer is armed, else 0.
+ *   DZSleepTimerEndOfTrack(): 1 if the armed timer fires at end-of-track. */
+extern void      DZSetSleepTimer(int minutes, int endOfTrack);
+extern void      DZCancelSleepTimer(void);
+extern int       DZSleepTimerActive(void);
+extern int       DZSleepTimerEndOfTrack(void);
+extern long long DZSleepTimerRemainingMS(void);
+
 /* Deezer "Electric Violet". */
 #define ACCENT "#A238FF"
 
@@ -777,10 +792,12 @@ static void preload_done(GObject *src, GAsyncResult *res, gpointer data) {
 }
 
 /* If gapless is on, preload the deterministic next track so the engine can swap
- * to it seamlessly when the current one ends. (There is no shuffle here, so the
- * next track is always current_index + 1.) */
+ * to it seamlessly when the current one ends. Only the sequential next
+ * (current_index + 1) is deterministic, so skip preloading under shuffle or
+ * repeat-one — those have no fixed next track (matches the core TUI). */
 static void maybe_preload_next(App *a) {
   if (!a->gapless || a->current_index < 0) return;
+  if (a->shuffle_on || a->repeat_mode == 2) return;
   int next = a->current_index + 1;
   guint n = g_list_model_get_n_items(G_LIST_MODEL(a->track_store));
   if ((guint)next >= n || next == a->preloaded_index) return;
@@ -841,6 +858,36 @@ static void play_relative(App *a, int delta) {
   play_index(a, base + delta);
 }
 
+/* Pick the queue index to advance to for a FORWARD step under the current
+ * shuffle/repeat policy (the engine no-ops these locally — the GUI owns the
+ * queue).  manual = TRUE for a user-pressed Next (repeat-one still advances,
+ * shuffle randomizes); manual = FALSE for a natural end-of-track auto-advance
+ * (repeat-one replays the current track).  Returns -1 to stop (queue empty, or
+ * end reached with repeat off). */
+static int next_index(App *a, gboolean manual) {
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(a->track_store));
+  if (n == 0) return -1;
+  int cur = a->current_index;
+
+  /* repeat-one: only the natural end replays; manual Next advances as usual */
+  if (a->repeat_mode == 2 && !manual)
+    return cur < 0 ? 0 : cur;
+
+  /* shuffle: random index, preferring not to immediately repeat the current */
+  if (a->shuffle_on) {
+    if (n == 1) return 0;
+    int idx = g_random_int_range(0, (gint)n);
+    if (idx == cur) idx = (idx + 1) % (int)n;
+    return idx;
+  }
+
+  /* sequential */
+  int nxt = (cur < 0 ? -1 : cur) + 1;
+  if (nxt >= (int)n)
+    return a->repeat_mode == 1 ? 0 : -1; /* repeat-all wraps to 0, else stop */
+  return nxt;
+}
+
 static void on_play_clicked(GtkButton *b, gpointer data) {
   (void)b;
   App *a = data;
@@ -850,7 +897,12 @@ static void on_play_clicked(GtkButton *b, gpointer data) {
     DZTogglePause();
 }
 static void on_prev_clicked(GtkButton *b, gpointer data) { (void)b; play_relative(data, -1); }
-static void on_next_clicked(GtkButton *b, gpointer data) { (void)b; play_relative(data, 1); }
+static void on_next_clicked(GtkButton *b, gpointer data) {
+  (void)b;
+  App *a = data;
+  int idx = next_index(a, TRUE); /* manual: shuffle randomizes, repeat-one advances */
+  if (idx >= 0) play_index(a, idx);
+}
 
 /* ---------------------------------------------------------------------------
  * settings: a tiny GKeyFile alongside arl.txt (~/.config/opendeezer/settings.ini)
@@ -965,6 +1017,29 @@ static void on_crossfade_selected(GObject *row, GParamSpec *ps, gpointer data) {
   else toast(a, "Crossfade off");
 }
 
+/* sleep-timer combo options: minutes before an auto-fade-out pause. The last
+ * entry ("End of track") pauses when the current track finishes instead; index
+ * 0 ("Off") cancels. Both endpoints carry 0 minutes, so they are distinguished
+ * by their position (see on_sleep_timer_selected). */
+static const int SLEEP_MIN[] = {0, 15, 30, 45, 60, 0};
+
+static void on_sleep_timer_selected(GObject *row, GParamSpec *ps, gpointer data) {
+  (void)ps;
+  App *a = data;
+  guint i = adw_combo_row_get_selected(ADW_COMBO_ROW(row));
+  if (i >= G_N_ELEMENTS(SLEEP_MIN)) i = 0;
+  if (i == 0) {
+    DZCancelSleepTimer();
+    toast(a, "Sleep timer off");
+  } else if (i == G_N_ELEMENTS(SLEEP_MIN) - 1) { /* last option = end-of-track */
+    DZSetSleepTimer(0, 1);
+    toast(a, "Sleep timer: end of track");
+  } else {
+    DZSetSleepTimer(SLEEP_MIN[i], 0);
+    toastf(a, "Sleep timer: %d min", SLEEP_MIN[i]);
+  }
+}
+
 static void on_device_selected(GObject *row, GParamSpec *ps, gpointer data) {
   (void)ps;
   App *a = data;
@@ -1028,6 +1103,7 @@ static GtkWidget *build_device_row(App *a) {
   }
 
   adw_combo_row_set_model(ADW_COMBO_ROW(row), G_LIST_MODEL(names));
+  g_object_unref(names); /* set_model is transfer-none — drop our creation ref */
   adw_combo_row_set_selected(ADW_COMBO_ROW(row), selected);
   g_object_set_data_full(G_OBJECT(row), "dev_ids", ids, (GDestroyNotify)g_ptr_array_unref);
   g_signal_connect(row, "notify::selected", G_CALLBACK(on_device_selected), a);
@@ -1281,8 +1357,9 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
                                  "HiFi — FLAC lossless", NULL};
   GtkWidget *quality = adw_combo_row_new();
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(quality), "Streaming quality");
-  adw_combo_row_set_model(ADW_COMBO_ROW(quality),
-                          G_LIST_MODEL(gtk_string_list_new(qlabels)));
+  GtkStringList *qmodel = gtk_string_list_new(qlabels);
+  adw_combo_row_set_model(ADW_COMBO_ROW(quality), G_LIST_MODEL(qmodel));
+  g_object_unref(qmodel); /* set_model is transfer-none — drop our creation ref */
   adw_combo_row_set_selected(ADW_COMBO_ROW(quality), (guint)a->quality);
   g_signal_connect(quality, "notify::selected", G_CALLBACK(on_quality_selected), a);
   adw_preferences_group_add(audio, quality);
@@ -1311,7 +1388,9 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
   const char *const xlabels[] = {"Off", "3 seconds", "6 seconds", "12 seconds", NULL};
   GtkWidget *xfade = adw_combo_row_new();
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(xfade), "Crossfade");
-  adw_combo_row_set_model(ADW_COMBO_ROW(xfade), G_LIST_MODEL(gtk_string_list_new(xlabels)));
+  GtkStringList *xmodel = gtk_string_list_new(xlabels);
+  adw_combo_row_set_model(ADW_COMBO_ROW(xfade), G_LIST_MODEL(xmodel));
+  g_object_unref(xmodel); /* set_model is transfer-none — drop our creation ref */
   guint xsel = 0;
   int curx = DZCrossfadeMS();
   for (guint i = 0; i < G_N_ELEMENTS(CROSSFADE_MS); i++)
@@ -1334,6 +1413,31 @@ static void on_settings(GSimpleAction *action, GVariant *param, gpointer data) {
   adw_switch_row_set_active(ADW_SWITCH_ROW(bg), a->background);
   g_signal_connect(bg, "notify::active", G_CALLBACK(on_background_toggled), a);
   adw_preferences_group_add(behave, bg);
+
+  /* sleep timer — pause after a delay (auto fade-out) or when the track ends */
+  const char *const slabels[] = {"Off", "15 minutes", "30 minutes",
+                                 "45 minutes", "60 minutes", "End of track", NULL};
+  GtkWidget *sleep = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(sleep), "Sleep timer");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(sleep),
+                              "Pause playback after a delay or when the track ends");
+  GtkStringList *smodel = gtk_string_list_new(slabels);
+  adw_combo_row_set_model(ADW_COMBO_ROW(sleep), G_LIST_MODEL(smodel));
+  g_object_unref(smodel); /* set_model is transfer-none — drop our creation ref */
+  guint ssel = 0;
+  if (DZSleepTimerActive()) {
+    if (DZSleepTimerEndOfTrack()) {
+      ssel = G_N_ELEMENTS(SLEEP_MIN) - 1; /* "End of track" */
+    } else {
+      int mins = (int)((DZSleepTimerRemainingMS() + 59999) / 60000); /* round up */
+      for (guint i = 1; i < G_N_ELEMENTS(SLEEP_MIN) - 1; i++)
+        if (SLEEP_MIN[i] == mins) { ssel = i; break; }
+    }
+  }
+  adw_combo_row_set_selected(ADW_COMBO_ROW(sleep), ssel);
+  g_signal_connect(sleep, "notify::selected", G_CALLBACK(on_sleep_timer_selected), a);
+  adw_preferences_group_add(behave, sleep);
+
   adw_preferences_page_add(page, behave);
 
   /* ---- Remote control (control API used by the phone/MCP remotes) ---- */
@@ -4065,12 +4169,14 @@ static gboolean tick(gpointer data) {
     a->last_finished = fin;
     if (a->playing_episode) {
       a->playing_episode = FALSE; /* episodes don't auto-advance the track queue */
-    } else if (a->gapless && DZState() == 2) {
-      /* the engine already gaplessly swapped to the preloaded next track:
-       * advance the UI pointer without a fresh DZPlay and preload the new next */
+    } else if (a->gapless && !a->shuffle_on && a->repeat_mode != 2 && DZState() == 2) {
+      /* the engine already gaplessly swapped to the preloaded (sequential) next
+       * track: advance the UI pointer without a fresh DZPlay and preload the new
+       * next.  Skipped under shuffle/repeat-one (no deterministic preload). */
       advance_pointer_gapless(a);
     } else {
-      play_relative(a, 1); /* auto-advance */
+      int idx = next_index(a, FALSE); /* auto-advance honors shuffle/repeat */
+      if (idx >= 0) play_index(a, idx);
     }
   }
 
@@ -4510,7 +4616,7 @@ static void on_about(GSimpleAction *action, GVariant *param, gpointer data) {
   adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(about), "OpenDeezer");
   adw_about_dialog_set_application_icon(ADW_ABOUT_DIALOG(about), "org.opendeezer.OpenDeezer");
   adw_about_dialog_set_developer_name(ADW_ABOUT_DIALOG(about), "Cycl0o0");
-  adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), "1.5.2");
+  adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), "1.6.0");
   adw_about_dialog_set_comments(ADW_ABOUT_DIALOG(about), comments);
   adw_about_dialog_set_license_type(ADW_ABOUT_DIALOG(about), GTK_LICENSE_AGPL_3_0);
   adw_about_dialog_set_copyright(ADW_ABOUT_DIALOG(about), "© Cycl0o0");
@@ -4521,7 +4627,7 @@ static void on_about(GSimpleAction *action, GVariant *param, gpointer data) {
       "application-name", "OpenDeezer",
       "application-icon", "org.opendeezer.OpenDeezer",
       "developer-name", "Cycl0o0",
-      "version", "1.5.2",
+      "version", "1.6.0",
       "comments", comments,
       "license-type", GTK_LICENSE_AGPL_3_0,
       "copyright", "© Cycl0o0",

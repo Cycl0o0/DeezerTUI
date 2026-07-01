@@ -1,5 +1,6 @@
 #include "logindialog.h"
 
+#include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -10,6 +11,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QStandardPaths>
@@ -169,10 +171,20 @@ void LoginDialog::tryArl(const QString &arl) {
     m_status->setText(QStringLiteral("Verifying your account…"));
     m_status->setVisible(true);
 
+    // This dialog is a stack local in MainWindow. setBusy() only disables the
+    // buttons — the modal can still be dismissed via Escape or the window close
+    // button while DZInit blocks on a worker (reject()/closeEvent below refuse
+    // that while verifying). Belt-and-suspenders: guard the GUI-thread callback
+    // with a QPointer and post it through qApp (always outlives the dialog) so
+    // neither the queued lambda nor invokeMethod's receiver touches a freed
+    // dialog.
     const QByteArray ab = arl.toUtf8();
-    QtConcurrent::run([this, ab, arl] {
+    QPointer<LoginDialog> self(this);
+    QtConcurrent::run([this, self, ab, arl] {
         const int ok = DZInit(cstr(ab));
-        QMetaObject::invokeMethod(this, [this, ok, arl] {
+        QMetaObject::invokeMethod(qApp, [this, self, ok, arl] {
+            if (!self)
+                return;
             m_verifying = false;
             if (ok) {
                 m_arl = arl;
@@ -206,4 +218,22 @@ void LoginDialog::showError(const QString &msg) {
     m_status->setStyleSheet(QStringLiteral("color:#D32F2F;"));
     m_status->setText(msg);
     m_status->setVisible(true);
+}
+
+// Refuse to close while a DZInit verify is in flight on a worker thread: the
+// worker still references this dialog, so tearing it down here would free it
+// out from under the worker. Escape and QDialog's own close handling both go
+// through reject(); the window close button also goes through closeEvent().
+void LoginDialog::reject() {
+    if (m_verifying)
+        return;
+    QDialog::reject();
+}
+
+void LoginDialog::closeEvent(QCloseEvent *e) {
+    if (m_verifying) {
+        e->ignore();
+        return;
+    }
+    QDialog::closeEvent(e);
 }

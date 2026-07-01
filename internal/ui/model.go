@@ -81,6 +81,7 @@ type Model struct {
 	pendingSeek   int64          // ms to seek to once the next stream is ready (resume)
 	searchPodcast bool           // search screen is in podcast mode
 	episodeMode   bool           // current queue is podcast episodes (plain streams)
+	sleepStep     int            // sleep-timer cycle position (see cycleSleepTimer)
 
 	// GitHub release check (see updatecheck.go / internal/update). The
 	// startup check is silent unless a newer version is found; a manual
@@ -147,10 +148,11 @@ type remoteStateMsg struct {
 // controlCmdMsg is a command from the control API, delivered onto the update
 // loop so it runs single-threaded with the rest of the model.
 type controlCmdMsg struct {
-	kind string // playpause|next|prev|stop|restart|repeat|shuffle|seek|volume|playtrack|playplaylist
+	kind string // playpause|next|prev|stop|restart|repeat|shuffle|seek|volume|playtrack|playplaylist|sleep|sleepcancel
 	id   string // track/playlist id (playtrack/playplaylist)
-	ms   int64  // absolute position for seek
+	ms   int64  // absolute position for seek; minutes for sleep
 	vol  float64
+	eot  bool // end-of-track mode for sleep
 }
 
 // playNowMsg replaces the queue with tracks and starts playing the first one.
@@ -258,6 +260,10 @@ func (m *Model) StartControl(send func(tea.Msg)) error {
 		SetVolume:     func(v float64) { send(controlCmdMsg{kind: "volume", vol: v}) },
 		PlayTrack:     func(id string) { send(controlCmdMsg{kind: "playtrack", id: id}) },
 		PlayPlaylist:  func(id string) { send(controlCmdMsg{kind: "playplaylist", id: id}) },
+		SetSleepTimer: func(minutes int, eot bool) {
+			send(controlCmdMsg{kind: "sleep", ms: int64(minutes), eot: eot})
+		},
+		CancelSleepTimer: func() { send(controlCmdMsg{kind: "sleepcancel"}) },
 	}
 	status := func() control.State {
 		if p := m.ctrlState.Load(); p != nil {
@@ -337,6 +343,9 @@ func (m *Model) publishControl() {
 	}
 	st.Shuffle = m.q.Shuffle()
 	st.Format = m.player.Format()
+	st.SleepActive = m.player.SleepActive()
+	st.SleepEndOfTrack = m.player.SleepEndOfTrack()
+	st.SleepRemainingMS = m.player.SleepRemainingMS()
 	tracks := m.q.Tracks()
 	if len(tracks) > 0 {
 		st.Queue = make([]control.Track, 0, len(tracks))
@@ -345,6 +354,38 @@ func (m *Model) publishControl() {
 		}
 	}
 	m.ctrlState.Store(&st)
+}
+
+// sleepMinutes maps the sleep-timer cycle step to a duration (0 = off, -1 slot
+// used for end-of-track). Steps: off → 15 → 30 → 45 → 60 → end-of-track → off.
+var sleepMinutes = []int{0, 15, 30, 45, 60, -1}
+
+// cycleSleepTimer advances the sleep-timer selection and applies it to the player.
+func (m *Model) cycleSleepTimer() {
+	m.sleepStep = (m.sleepStep + 1) % len(sleepMinutes)
+	switch mins := sleepMinutes[m.sleepStep]; {
+	case mins == 0:
+		m.player.CancelSleepTimer()
+	case mins < 0:
+		m.player.SetSleepTimer(0, true) // end-of-track
+	default:
+		m.player.SetSleepTimer(time.Duration(mins)*time.Minute, false)
+	}
+}
+
+// sleepStatus renders a human-readable sleep-timer status line.
+func sleepStatus(p *audio.Player) string {
+	if !p.SleepActive() {
+		return "Sleep timer off"
+	}
+	if p.SleepEndOfTrack() {
+		return "Sleep: at end of track"
+	}
+	rem := p.SleepRemainingMS() / 1000
+	if rem >= 60 {
+		return "Sleep: pausing in " + strconv.Itoa(int((rem+59)/60)) + " min"
+	}
+	return "Sleep: pausing in " + strconv.Itoa(int(rem)) + "s"
 }
 
 // publishAccount stores the identity snapshot the control HTTP goroutine reads

@@ -1,6 +1,26 @@
 import SwiftUI
 import UIKit
 
+/// Sleep-timer choices offered in Settings. Raw value is the minute count;
+/// `.off` cancels and `.endOfTrack` stops when the current track finishes.
+private enum SleepOption: Int, CaseIterable, Identifiable {
+    case off = 0
+    case min15 = 15
+    case min30 = 30
+    case min45 = 45
+    case min60 = 60
+    case endOfTrack = -1
+
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .endOfTrack: return "End of Track"
+        default: return "\(rawValue) min"
+        }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var updates: UpdateStore
@@ -11,6 +31,7 @@ struct SettingsView: View {
     @State private var gapless = AudioPrefs.gapless
     @State private var replayGain = AudioPrefs.replayGain
     @State private var crossfadeMs = Double(AudioPrefs.crossfadeMs)
+    @State private var sleepOption: SleepOption = .off
 
     @State private var remoteInfo: WebRemoteInfo?
     @State private var qrImage: UIImage?
@@ -74,6 +95,19 @@ struct SettingsView: View {
                             .tint(Palette.accent)
                             .onChange(of: crossfadeMs) { _, value in AudioPrefs.crossfadeMs = Int(value); Engine.setCrossfadeMS(Int(value)) }
                     }
+                }
+
+                Section {
+                    Picker("Sleep Timer", selection: $sleepOption) {
+                        ForEach(SleepOption.allCases) { option in
+                            Text(option.label).tag(option)
+                        }
+                    }
+                    .onChange(of: sleepOption) { _, value in applySleep(value) }
+                } header: {
+                    Text("Sleep Timer")
+                } footer: {
+                    Text("Pause playback after a set time (with a gentle fade-out) or when the current track ends.")
                 }
 
                 Section {
@@ -168,9 +202,30 @@ struct SettingsView: View {
                 }
             }
             .task {
+                syncSleep()
                 await refreshRemote()
                 await refreshConnect()
             }
+        }
+    }
+
+    /// Arm or cancel the engine's sleep timer for the chosen preset.
+    private func applySleep(_ option: SleepOption) {
+        switch option {
+        case .off: Engine.cancelSleepTimer()
+        case .endOfTrack: Engine.setSleepTimer(minutes: 0, endOfTrack: true)
+        default: Engine.setSleepTimer(minutes: option.rawValue, endOfTrack: false)
+        }
+    }
+
+    /// Reflect the engine's current sleep state in the picker when Settings
+    /// opens. An active minutes timer can't be mapped back to an exact preset,
+    /// so the current selection is left untouched in that case.
+    private func syncSleep() {
+        if Engine.sleepEndOfTrack() {
+            sleepOption = .endOfTrack
+        } else if !Engine.sleepActive() {
+            sleepOption = .off
         }
     }
 

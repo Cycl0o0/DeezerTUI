@@ -97,6 +97,13 @@ fun TvLoginScreen(busy: Boolean, error: String?, onArl: (String) -> Unit) {
                             requestFocus()
                         }
                     },
+                    onRelease = {
+                        it.stopLoading()
+                        it.loadUrl("about:blank")
+                        (it.parent as? android.view.ViewGroup)?.removeView(it)
+                        it.removeAllViews()
+                        it.destroy()
+                    },
                 )
             }
             TvPill(

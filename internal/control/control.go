@@ -70,23 +70,30 @@ type State struct {
 	Shuffle    bool    `json:"shuffle"`
 	Format     string  `json:"format,omitempty"`
 	Queue      []Track `json:"queue,omitempty"`
+
+	// Sleep timer (0/false when not armed).
+	SleepActive      bool  `json:"sleepActive,omitempty"`
+	SleepEndOfTrack  bool  `json:"sleepEndOfTrack,omitempty"`
+	SleepRemainingMS int64 `json:"sleepRemainingMs,omitempty"`
 }
 
 // Commands are the mutating actions a controller exposes (each may be nil).
 type Commands struct {
-	PlayPause     func()
-	Next          func()
-	Prev          func()
-	Stop          func()
-	Restart       func() // seek to 0
-	CycleRepeat   func()
-	ToggleShuffle func()
-	SetRepeat     func(mode string) // mode: "off"|"all"|"one" (SET variant)
-	SetShuffle    func(on bool)     // on: true/false (SET variant)
-	Seek          func(ms int64)
-	SetVolume     func(v float64)
-	PlayTrack     func(id string)
-	PlayPlaylist  func(id string)
+	PlayPause        func()
+	Next             func()
+	Prev             func()
+	Stop             func()
+	Restart          func() // seek to 0
+	CycleRepeat      func()
+	ToggleShuffle    func()
+	SetRepeat        func(mode string) // mode: "off"|"all"|"one" (SET variant)
+	SetShuffle       func(on bool)     // on: true/false (SET variant)
+	Seek             func(ms int64)
+	SetVolume        func(v float64)
+	PlayTrack        func(id string)
+	PlayPlaylist     func(id string)
+	SetSleepTimer    func(minutes int, endOfTrack bool) // arm the sleep timer
+	CancelSleepTimer func()                             // disarm it
 }
 
 // Config configures the control server.
@@ -269,6 +276,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/volume", s.post(s.handleVolume))
 	mux.HandleFunc("/play/track", s.post(s.handlePlayTrack))
 	mux.HandleFunc("/play/playlist", s.post(s.handlePlayPlaylist))
+	mux.HandleFunc("/sleep", s.post(s.handleSleep))
 }
 
 func call(fn func()) {
@@ -428,16 +436,16 @@ func (s *Server) handleRemote(w http.ResponseWriter, r *http.Request) {
 // handlePair handles POST /pair: validates the 6-digit code and, on success,
 // issues a session token. Rate-limited to ~5 attempts per minute.
 func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
-	// Read code from query string first, then JSON body. Do this outside the lock
-	// to avoid holding it across I/O.
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		var body struct {
-			Code string `json:"code"`
-		}
-		_ = json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body)
-		code = body.Code
+	// Read the code from the JSON body only. The pairing code is a credential that
+	// mints a 12h session token, so it must never travel in the query string (which
+	// leaks into proxy/access logs, browser history and Referer) — matching this
+	// package's header/body-only credential policy. The bundled SPA already POSTs it
+	// in the body. Read outside the lock to avoid holding it across I/O.
+	var body struct {
+		Code string `json:"code"`
 	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body)
+	code := body.Code
 
 	s.pairMu.Lock()
 	defer s.pairMu.Unlock()
@@ -617,6 +625,32 @@ func (s *Server) handlePlayPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.cmds.PlayPlaylist != nil {
 		s.cmds.PlayPlaylist(id)
+	}
+	writeJSON(w, s.status())
+}
+
+// handleSleep handles POST /sleep. ?minutes=N arms a duration timer; ?eot=1 arms
+// an end-of-track timer; ?minutes=0 (or ?cancel=1) disarms it.
+func (s *Server) handleSleep(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	eot := q.Get("eot") == "1" || q.Get("eot") == "true"
+	if q.Get("cancel") == "1" {
+		if s.cmds.CancelSleepTimer != nil {
+			s.cmds.CancelSleepTimer()
+		}
+		writeJSON(w, s.status())
+		return
+	}
+	minutes, _ := strconv.Atoi(q.Get("minutes"))
+	if !eot && minutes <= 0 {
+		if s.cmds.CancelSleepTimer != nil {
+			s.cmds.CancelSleepTimer()
+		}
+		writeJSON(w, s.status())
+		return
+	}
+	if s.cmds.SetSleepTimer != nil {
+		s.cmds.SetSleepTimer(minutes, eot)
 	}
 	writeJSON(w, s.status())
 }

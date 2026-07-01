@@ -245,6 +245,23 @@ enum Core {
         withC(trackID) { DZPreload($0, Int64(durationMs)) }
     }
 
+    // MARK: sleep timer (v1.6)
+
+    /// Arms the sleep timer. `minutes` > 0 pauses playback (with an automatic
+    /// fade-out) after that many minutes; `endOfTrack` pauses when the current
+    /// track ends (minutes ignored). minutes <= 0 with endOfTrack == false cancels.
+    static func setSleepTimer(minutes: Int, endOfTrack: Bool) {
+        DZSetSleepTimer(Int32(minutes), endOfTrack ? 1 : 0)
+    }
+    /// Cancels any armed sleep timer.
+    static func cancelSleepTimer() { DZCancelSleepTimer() }
+    /// True while a sleep timer (minutes or end-of-track) is armed.
+    static func sleepActive() -> Bool { DZSleepTimerActive() == 1 }
+    /// True when the armed timer fires at the end of the current track.
+    static func sleepEndOfTrack() -> Bool { DZSleepTimerEndOfTrack() == 1 }
+    /// Milliseconds until a minutes-based timer fires (0 for end-of-track / off).
+    static func sleepRemainingMS() -> Int64 { DZSleepTimerRemainingMS() }
+
     // MARK: OpenDeezer Connect (device picker)
 
     /// Discovers OpenDeezer devices on the LAN (~700ms). Returns [] on none/error.

@@ -170,6 +170,29 @@ func (q *Queue) PeekNext() (deezer.Track, bool) {
 	return q.tracks[ni], true
 }
 
+// AdvanceLinear advances the cursor to the deterministic next track (linear +1,
+// or a RepeatAll wrap) regardless of shuffle/RepeatOne, matching exactly what
+// PeekNext returned. Used to sync the cursor after the player gaplessly swapped
+// in the preloaded (always deterministic) next track, so the cursor can't jump
+// to a random shuffle pick that differs from the audio. Reports whether it moved.
+func (q *Queue) AdvanceLinear() bool {
+	if len(q.tracks) == 0 {
+		return false
+	}
+	ni := -1
+	if q.index+1 < len(q.tracks) {
+		ni = q.index + 1
+	} else if q.repeat == RepeatAll {
+		ni = 0
+	}
+	if ni < 0 {
+		return false
+	}
+	q.history = append(q.history, q.index)
+	q.index = ni
+	return true
+}
+
 // AdvanceAuto is called when a track ends naturally: RepeatOne replays the
 // current track (reports true, cursor unchanged); otherwise it behaves like
 // Next. Returns whether playback should continue.

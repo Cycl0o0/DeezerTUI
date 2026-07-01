@@ -77,6 +77,9 @@ const (
 	ringMax     = 4 * bytesPerSec // ~4s of decoded PCM buffered (headroom vs underrun)
 	prebufferB  = 2 * bytesPerSec // fill ~2s before starting (clean intro, no underrun burst)
 	decodeChunk = 16 * 1024
+
+	fadeInFrames = sampleRate * 12 / 1000 // ~12ms anti-click ramp after a discontinuity
+	sleepFadeNS  = int64(8 * time.Second) // sleep-timer fade-out window before pausing
 )
 
 // streamUserAgent is sent when fetching audio so third-party podcast hosts
@@ -139,6 +142,21 @@ type Player struct {
 	cbUnderrun  atomic.Int64 // callbacks with a short read (ring starvation)
 	onFinish    func()
 
+	// fadeLeft is the number of frames still to ramp up (anti-click fade-in) after
+	// a playback discontinuity (start / resume / seek). Touched only from the RT
+	// callback and set (store) from control calls; a stale read just fades a hair
+	// longer, which is harmless.
+	fadeLeft atomic.Int64
+	// mix is a reusable scratch buffer for the crossfade path so the realtime
+	// callback never allocates. Accessed only from readPCM (single goroutine).
+	mix []byte
+
+	// Sleep timer (core-owned so every client shares one implementation).
+	sleepArmed atomic.Bool
+	sleepEOT   atomic.Bool   // end-of-track mode (else duration mode)
+	sleepAtNS  atomic.Int64  // wall-clock deadline (UnixNano) for duration mode
+	sleepGain  atomic.Uint64 // float64 bits: fade-out envelope, 1.0 when not fading
+
 	stopMgr chan struct{}
 	mgrOnce sync.Once
 }
@@ -161,18 +179,43 @@ func dbToFactor(db float64) float64 {
 
 func (p *Player) SetReplayGain(on bool) {
 	p.rgOn.Store(on)
-	if !on {
+	if on {
+		// Apply the current track's gain immediately, so enabling ReplayGain
+		// mid-playback takes effect now instead of only on the next Play().
+		if cur := p.cur.Load(); cur != nil && cur.plan != nil {
+			p.gainFac.Store(math.Float64bits(dbToFactor(cur.plan.GainDB)))
+		}
+	} else {
 		p.gainFac.Store(math.Float64bits(1))
 	}
 }
 func (p *Player) ReplayGain() bool { return p.rgOn.Load() }
+
+// volumeTaper maps a 0..1 slider position to a perceptual amplitude gain. Human
+// loudness perception is roughly logarithmic, so a linear slider crams almost
+// all usable range into the bottom (50% already sounds nearly full). A cubic
+// taper spreads the range so the control feels natural in every client. The
+// public 0..1 volume API is unchanged; only the applied gain is tapered.
+func volumeTaper(v float64) float64 {
+	if v <= 0 {
+		return 0
+	}
+	if v >= 1 {
+		return 1
+	}
+	return v * v * v
+}
 
 func (p *Player) effectiveVolume() float64 {
 	f := math.Float64frombits(p.gainFac.Load())
 	if f == 0 {
 		f = 1
 	}
-	return p.Volume() * f
+	sg := math.Float64frombits(p.sleepGain.Load())
+	if sg < 0 || sg > 1 { // uninitialized (0 bits) or garbage -> full
+		sg = 1
+	}
+	return volumeTaper(p.Volume()) * f * sg
 }
 
 // SetGapless enables/disables gapless transitions between tracks.
@@ -188,6 +231,61 @@ func (p *Player) SetCrossfadeMS(ms int) {
 }
 func (p *Player) CrossfadeMS() int { return int(p.crossfadeMS.Load()) }
 
+// ---- sleep timer ----
+
+// SetSleepTimer arms the sleep timer. When endOfTrack is true the player pauses
+// once the current track finishes (d is ignored); otherwise it fades out over
+// the last few seconds and pauses after d elapses. d <= 0 with endOfTrack false
+// cancels any armed timer.
+func (p *Player) SetSleepTimer(d time.Duration, endOfTrack bool) {
+	if !endOfTrack && d <= 0 {
+		p.CancelSleepTimer()
+		return
+	}
+	p.sleepGain.Store(math.Float64bits(1))
+	p.sleepEOT.Store(endOfTrack)
+	if !endOfTrack {
+		p.sleepAtNS.Store(time.Now().Add(d).UnixNano())
+	} else {
+		p.sleepAtNS.Store(0)
+	}
+	p.sleepArmed.Store(true)
+}
+
+// CancelSleepTimer disarms the sleep timer and restores full volume.
+func (p *Player) CancelSleepTimer() { p.clearSleep(); p.sleepGain.Store(math.Float64bits(1)) }
+
+func (p *Player) clearSleep() {
+	p.sleepArmed.Store(false)
+	p.sleepEOT.Store(false)
+	p.sleepAtNS.Store(0)
+}
+
+// SleepActive reports whether a sleep timer is armed.
+func (p *Player) SleepActive() bool { return p.sleepArmed.Load() }
+
+// SleepEndOfTrack reports whether the armed timer is in end-of-track mode.
+func (p *Player) SleepEndOfTrack() bool { return p.sleepArmed.Load() && p.sleepEOT.Load() }
+
+// SleepRemainingMS returns the milliseconds until the timer fires: for duration
+// mode the wall-clock remainder, for end-of-track mode the current track's
+// remaining time. Returns 0 when no timer is armed.
+func (p *Player) SleepRemainingMS() int64 {
+	if !p.sleepArmed.Load() {
+		return 0
+	}
+	if p.sleepEOT.Load() {
+		if r := p.DurationMS() - p.PositionMS(); r > 0 {
+			return r
+		}
+		return 0
+	}
+	if r := (p.sleepAtNS.Load() - time.Now().UnixNano()) / int64(time.Millisecond); r > 0 {
+		return r
+	}
+	return 0
+}
+
 // ---- construction ----
 
 // NewPlayer initializes the audio output (backend chosen by build tag).
@@ -201,6 +299,7 @@ func NewPlayer() (*Player, error) {
 	p.lastErr.Store("")
 	p.format.Store("")
 	p.gainFac.Store(math.Float64bits(1))
+	p.sleepGain.Store(math.Float64bits(1))
 	p.gapless.Store(true)
 	p.setVolume(1.0)
 	if err := p.out.start(p.readPCM); err != nil {
@@ -236,7 +335,14 @@ func (p *Player) readPCM(out []byte) int {
 		total := cur.durMS
 		pos := p.played.Load() * 1000 / bytesPerSec
 		if total > 0 && pos >= total-xfadeMS {
-			mix := make([]byte, len(out))
+			// Reuse a scratch buffer instead of allocating on every RT callback.
+			if cap(p.mix) < len(out) {
+				p.mix = make([]byte, len(out))
+			}
+			mix := p.mix[:len(out)]
+			for i := range mix {
+				mix[i] = 0
+			}
 			m := next.ring.read(mix)
 			fade := float64(pos-(total-xfadeMS)) / float64(xfadeMS)
 			if fade < 0 {
@@ -254,6 +360,11 @@ func (p *Player) readPCM(out []byte) int {
 	}
 
 	applyGain(out[:n], p.effectiveVolume())
+	// Anti-click: ramp the first few ms up after a discontinuity (start / resume /
+	// seek) so the cut into a fresh waveform doesn't pop.
+	if fl := p.fadeLeft.Load(); fl > 0 {
+		p.fadeLeft.Store(applyFadeIn(out[:n], fl))
+	}
 	p.played.Add(int64(n))
 
 	// Diagnostics: a short read means the ring didn't have a full callback's
@@ -307,6 +418,7 @@ func (p *Player) Play(plan *deezer.StreamPlan, durationMS int64) error {
 	p.played.Store(0)
 	p.totalMS.Store(durationMS)
 	p.format.Store(plan.Format)
+	p.fadeLeft.Store(fadeInFrames) // anti-click ramp on the fresh track
 	if p.rgOn.Load() {
 		p.gainFac.Store(math.Float64bits(dbToFactor(plan.GainDB)))
 	} else {
@@ -345,6 +457,15 @@ func (p *Player) Preload(plan *deezer.StreamPlan, durationMS int64) {
 	}
 }
 
+// ClearPreload discards any preloaded next source. Call when the upcoming track
+// is no longer determined (e.g. shuffle/repeat was toggled after a linear-next
+// was preloaded) so a stale preload can't be gaplessly swapped in.
+func (p *Player) ClearPreload() {
+	if old := p.next.Swap(nil); old != nil {
+		old.kill()
+	}
+}
+
 // manage advances to the preloaded next source when the current one is drained.
 func (p *Player) manage() {
 	ticker := time.NewTicker(40 * time.Millisecond)
@@ -355,6 +476,22 @@ func (p *Player) manage() {
 		case <-p.stopMgr:
 			return
 		case <-ticker.C:
+			// Sleep timer (duration mode): fade out over the last few seconds, then
+			// pause exactly at the deadline. End-of-track mode is handled in the
+			// finish branch below.
+			if p.sleepArmed.Load() && !p.sleepEOT.Load() {
+				remain := p.sleepAtNS.Load() - time.Now().UnixNano()
+				switch {
+				case remain <= 0:
+					if p.State() == Playing {
+						p.state.Store(int32(Paused))
+					}
+					p.clearSleep()
+					p.sleepGain.Store(math.Float64bits(1))
+				case remain <= sleepFadeNS:
+					p.sleepGain.Store(math.Float64bits(float64(remain) / float64(sleepFadeNS)))
+				}
+			}
 			// Diagnostics: log callback/underrun counts every ~5s while playing.
 			if ticks++; ticks%125 == 0 {
 				if c := p.cbCount.Load(); c > 0 {
@@ -387,6 +524,19 @@ func (p *Player) manage() {
 				if e := cur.lastErr(); e != "" {
 					p.lastErr.Store(e)
 				}
+				// End-of-track sleep timer: stop after this track finishes and do
+				// not advance (don't fire onFinish, so the engine won't auto-next).
+				if p.sleepArmed.Load() && p.sleepEOT.Load() {
+					if next != nil {
+						next.kill()
+						p.next.Store(nil)
+					}
+					cur.kill()
+					p.cur.Store(nil)
+					p.state.Store(int32(Stopped))
+					p.clearSleep()
+					continue
+				}
 				if next != nil {
 					// Seamless swap to the preloaded next track.
 					p.cur.Store(next)
@@ -395,6 +545,13 @@ func (p *Player) manage() {
 					p.played.Store(0)
 					p.totalMS.Store(next.durMS)
 					p.format.Store(next.format)
+					// Recompute the per-track ReplayGain for the swapped-in track;
+					// otherwise it would keep playing at the previous track's gain.
+					if p.rgOn.Load() && next.plan != nil {
+						p.gainFac.Store(math.Float64bits(dbToFactor(next.plan.GainDB)))
+					} else {
+						p.gainFac.Store(math.Float64bits(1))
+					}
 					if p.onFinish != nil {
 						p.onFinish()
 					}
@@ -424,6 +581,7 @@ func (p *Player) SeekMS(ms int64) {
 	off := ms * bytesPerSec / 1000
 	off -= off % frameBytes
 	p.played.Store(off)
+	p.fadeLeft.Store(fadeInFrames) // anti-click ramp after the scrub
 	cur.requestSeek(off)
 }
 
@@ -434,6 +592,7 @@ func (p *Player) Pause() {
 }
 func (p *Player) Resume() {
 	if p.State() == Paused {
+		p.fadeLeft.Store(fadeInFrames) // anti-click ramp on resume
 		p.state.Store(int32(Playing))
 	}
 }
@@ -667,6 +826,29 @@ func applyGain(b []byte, g float64) {
 		b[i] = byte(v)
 		b[i+1] = byte(uint16(v) >> 8)
 	}
+}
+
+// applyFadeIn ramps interleaved s16 stereo frames up to unity over fadeInFrames,
+// starting from `remaining` frames left, and returns the frames still to ramp.
+// Runs in the RT callback; no allocation.
+func applyFadeIn(b []byte, remaining int64) int64 {
+	for i := 0; i+frameBytes <= len(b) && remaining > 0; i += frameBytes {
+		g := float64(fadeInFrames-remaining) / float64(fadeInFrames)
+		if g < 0 {
+			g = 0
+		} else if g > 1 {
+			g = 1
+		}
+		for c := 0; c < channels; c++ {
+			off := i + c*2
+			v := int16(uint16(b[off]) | uint16(b[off+1])<<8)
+			v = int16(float64(v) * g)
+			b[off] = byte(v)
+			b[off+1] = byte(uint16(v) >> 8)
+		}
+		remaining--
+	}
+	return remaining
 }
 
 // mixPCM writes src*g into dst (same length); dst and src may alias.

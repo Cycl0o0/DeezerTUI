@@ -22,6 +22,7 @@ class QLineEdit;
 class QLabel;
 class QPushButton;
 class QProcess;
+class QCloseEvent;
 QT_END_NAMESPACE
 
 class LoginDialog : public QDialog {
@@ -30,6 +31,12 @@ public:
     explicit LoginDialog(QString arlPath, QWidget *parent = nullptr);
 
     QString arl() const { return m_arl; }
+
+protected:
+    // Both are no-ops while a DZInit verify is running on a worker thread, so
+    // the modal can't be torn down (Escape / window close) out from under it.
+    void reject() override;
+    void closeEvent(QCloseEvent *event) override;
 
 private:
     void runHelper();                // launch opendeezer-login, read the arl

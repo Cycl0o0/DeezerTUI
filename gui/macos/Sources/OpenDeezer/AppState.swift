@@ -21,6 +21,7 @@ final class AppState: ObservableObject {
     @Published var userID = ""
     @Published var account: Account?            // plan + entitlements (DZAccountJSON)
     @Published var replayGain = false           // loudness normalization (engine-owned)
+    @Published var sleepMode = 0                 // sleep timer: 0 off · N min · -1 end of track (engine-owned)
     @Published var showCredits = false
     @Published var showSettings = false
 
@@ -714,6 +715,20 @@ final class AppState: ObservableObject {
         settings.save()
     }
 
+    // MARK: sleep timer (engine-owned timing; sleepMode mirrors the armed choice)
+
+    // Arm or replace the sleep timer. mode: 0 = off, N > 0 = pause (with a
+    // fade-out) after N minutes, -1 = pause when the current track ends. The
+    // engine owns the countdown; tick() clears sleepMode once it fires.
+    func setSleepMode(_ mode: Int) {
+        sleepMode = mode
+        if mode < 0 {
+            Core.setSleepTimer(minutes: 0, endOfTrack: true)
+        } else {
+            Core.setSleepTimer(minutes: mode, endOfTrack: false)
+        }
+    }
+
     // True when the engine performs a seamless swap (gapless or crossfade);
     // gates next-track preloading and the no-replay UI advance.
     private var seamless: Bool { settings.gapless || settings.crossfadeMS > 0 }
@@ -834,6 +849,10 @@ final class AppState: ObservableObject {
     // MARK: polling
 
     private func startTimer() {
+        // Idempotent: finishLogin() runs on every successful login, including a
+        // "Switch account" re-login, so drop any existing timer before scheduling
+        // a new one — otherwise each re-login stacks another live 0.4s timer.
+        timer?.invalidate()
         lastFinished = Core.finishedCount
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
@@ -871,6 +890,12 @@ final class AppState: ObservableObject {
         if f != lastFinished {
             lastFinished = f
             handleAdvance()
+        }
+        // Clear the sleep-timer mirror once the engine's timer has fired (it
+        // pauses and disarms itself) so the Settings picker doesn't show a stale
+        // arm. Cheap: the `sleepMode != 0` guard short-circuits when it's off.
+        if sleepMode != 0 && !Core.sleepActive() && !Core.sleepEndOfTrack() {
+            sleepMode = 0
         }
     }
 
